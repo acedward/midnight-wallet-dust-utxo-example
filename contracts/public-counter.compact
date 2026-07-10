@@ -1,0 +1,17 @@
+pragma language_version >= 0.20;
+
+import CompactStandardLibrary;
+
+export ledger count: Counter;
+
+constructor(initial: Uint<16>) {
+  count.increment(disclose(initial));
+}
+
+export circuit incrementBy(n: Uint<16>): [] {
+  count.increment(disclose(n));
+}
+
+export circuit reset(): [] {
+  count.resetToDefault();
+}

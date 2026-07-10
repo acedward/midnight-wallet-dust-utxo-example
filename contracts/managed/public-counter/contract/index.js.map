@@ -1,0 +1,8 @@
+{
+  "version": 3,
+  "file": "index.js",
+  "sourceRoot": "../../../../",
+  "sources": ["src/public-counter.compact"],
+  "names": [],
+  "mappings": ";;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;EAMA;;;;;;;;;;MAIA,AAAA,WAEC;;;;;cAF0B,GAAW;;;;;;;;;;;;;;;;;;yCAAX,GAAW;;;;;;;wEAAX,GAAW;;;OAErC;MAED,AAAA,KAEC;;;;;;;;;;;;;;;;;;;;;;OAAA;;;;;;;;;;GARA;EAFD;;;;;UAAY,SAAiB;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;IAF7B;;;;;;;;;yEAA6B;IAG3B;;;;;;;;;;6FAAyB,SAAO;;;;wEAA3B;;;;;;;GACN;EAED,AAAA,cAEC,4BAF0B,GAAW;IACpC;;;;;;;;;;6FAAyB,GAAC;;;;wEAArB;;GACN;EAED,AAAA,QAEC;IADC;;;;;;;;;yEAAK;;GACN;;;;;;;;;;;;;;;;IAZD;qCAAA;;;;;;;;;;;0GAA6B;KAAA;;;;;;;;;;"
+}
