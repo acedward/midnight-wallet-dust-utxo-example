@@ -22,7 +22,13 @@ import { existsSync, readFileSync } from 'node:fs';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import * as Rx from 'rxjs';
 import { configFromEnv, type RunState, STATE_FILE } from './network.js';
-import { connectCounter, counterProviders, readCount, submitIncrementAsync, type CounterProviders } from './counter.js';
+import {
+  buildUnprovenIncrementTx,
+  connectCounter,
+  counterProviders,
+  readCount,
+  type CounterProviders,
+} from './counter.js';
 import {
   buildWallet,
   firstSyncedState,
@@ -95,6 +101,8 @@ interface WalletSummary {
   readonly dustCoins: number;
 }
 
+type SetPhase = (phase: string) => void;
+
 interface Ready {
   readonly state: RunState;
   readonly providers: CounterProviders;
@@ -102,8 +110,8 @@ interface Ready {
   readonly external: WalletContext;
   readonly benchInfo: () => WalletSummary;
   readonly externalInfo: () => WalletSummary;
-  readonly sendSelf: () => Promise<{ txHash: string }>;
-  readonly sendExternal: () => Promise<{ txHash: string }>;
+  readonly sendSelf: (setPhase: SetPhase) => Promise<{ txHash: string }>;
+  readonly sendExternal: (setPhase: SetPhase) => Promise<{ txHash: string }>;
 }
 
 let ready: Ready | null = null;
@@ -112,6 +120,8 @@ const emptyTotals = () => ({ requested: 0, succeeded: 0, failed: 0 });
 const totals: Record<TxMode, ReturnType<typeof emptyTotals>> = { self: emptyTotals(), external: emptyTotals() };
 let nextId = 1;
 const semaphore = new Semaphore(TX_CONCURRENCY);
+/** What each in-flight request is doing right now — surfaced via /stats to make any hang immediately visible. */
+const inFlight = new Map<number, { mode: TxMode; phase: string; since: number }>();
 
 const init = async (): Promise<void> => {
   while (!existsSync(STATE_FILE)) {
@@ -213,14 +223,46 @@ const init = async (): Promise<void> => {
   };
 
   /**
-   * Test case A: the benchmark wallet creates the ENTIRE transaction — one
-   * `incrementBy(1)` contract call (build → prove → balance dust → submit),
-   * then waits for on-chain finalization.
+   * Submit a finalized tx and wait for on-chain finalization. The submit await
+   * itself is hang-prone under concurrency (observed: tx broadcast + applied
+   * on-chain, `wallet.submitTransaction` never resolves), so it is RACED
+   * against the pending-set watch: whichever signal arrives first wins, and a
+   * genuine submission error still fails fast.
    */
-  const sendSelf = async (): Promise<{ txHash: string }> => {
-    const { txHash } = await submitIncrementAsync(providers, state.contractAddress);
-    await waitForFinalization([txHash], txHash);
+  const submitAndFinalize = async (
+    finalized: { identifiers: () => string[] },
+    setPhase: SetPhase,
+  ): Promise<{ txHash: string }> => {
+    const ids = finalized.identifiers();
+    const txHash = ids[0] ?? 'unknown';
+    setPhase('submit+finalize');
+    const submit: Promise<{ ok: true } | { ok: false; err: unknown }> = bench.wallet
+      .submitTransaction(finalized as never)
+      .then(
+        () => ({ ok: true as const }),
+        (err: unknown) => ({ ok: false as const, err }),
+      );
+    const finalizedWatch = waitForFinalization(ids, txHash).then(() => 'finalized' as const);
+    const first = await Promise.race([submit, finalizedWatch]);
+    if (first === 'finalized') return { txHash }; // applied on-chain; ignore a dangling submit await
+    if (!first.ok) throw first.err instanceof Error ? first.err : new Error(String(first.err));
+    await finalizedWatch;
     return { txHash };
+  };
+
+  /**
+   * Test case A: the benchmark wallet creates the ENTIRE transaction — one
+   * `incrementBy(1)` contract call: build → prove → balance dust → submit →
+   * wait for on-chain finalization.
+   */
+  const sendSelf = async (setPhase: SetPhase): Promise<{ txHash: string }> => {
+    setPhase('build');
+    const unprovenTx = await buildUnprovenIncrementTx(providers, state.contractAddress);
+    setPhase('prove');
+    const proven = await providers.proofProvider.proveTx(unprovenTx as never);
+    setPhase('balance');
+    const finalized = await providers.walletProvider.balanceTx(proven);
+    return submitAndFinalize(finalized, setPhase);
   };
 
   /**
@@ -228,9 +270,10 @@ const init = async (): Promise<void> => {
    * { payFees: false } (it holds no dust); the benchmark wallet balances the
    * missing dust fee, proves/finalizes, submits, and waits for finalization.
    */
-  const sendExternal = async (): Promise<{ txHash: string }> => {
+  const sendExternal = async (setPhase: SetPhase): Promise<{ txHash: string }> => {
     const ttl = new Date(Date.now() + 30 * 60 * 1000);
     // 1. External wallet builds the fee-less transaction and signs its inputs.
+    setPhase('external-build');
     const recipe = await external.wallet.transferTransaction(
       [{ type: 'unshielded', outputs: [{ type: night, receiverAddress: benchAddress, amount: externalTransferAmount }] }],
       { shieldedSecretKeys: external.shieldedSecretKeys, dustSecretKey: external.dustSecretKey },
@@ -239,19 +282,18 @@ const init = async (): Promise<void> => {
     const signed = await external.wallet.signRecipe(recipe, (payload) => external.unshieldedKeystore.signData(payload));
     if (signed.type !== 'UNPROVEN_TRANSACTION') throw new Error(`unexpected recipe type: ${signed.type}`);
 
-    // 2. Benchmark wallet balances the missing dust/gas, finalizes and submits.
+    // 2. Benchmark wallet balances the missing dust/gas and finalizes (proves).
+    setPhase('balance');
     const balanced = await bench.wallet.balanceUnprovenTransaction(
       signed.transaction,
       { shieldedSecretKeys: bench.shieldedSecretKeys, dustSecretKey: bench.dustSecretKey },
       { ttl },
     );
+    setPhase('prove');
     const finalized = await bench.wallet.finalizeRecipe(balanced);
-    const ids = finalized.identifiers();
-    const txHash = await bench.wallet.submitTransaction(finalized);
 
-    // 3. Same finalization semantics as test case A.
-    await waitForFinalization(ids, txHash);
-    return { txHash };
+    // 3. Same submit + finalization semantics as test case A.
+    return submitAndFinalize(finalized, setPhase);
   };
 
   ready = {
@@ -271,11 +313,13 @@ const handleTx = async (mode: TxMode): Promise<TxResult> => {
   const id = nextId++;
   totals[mode].requested++;
   const started = Date.now();
+  inFlight.set(id, { mode, phase: 'queue', since: started });
+  const setPhase: SetPhase = (phase) => inFlight.set(id, { mode, phase, since: Date.now() });
   const release = await semaphore.acquire();
   const queueMs = Date.now() - started;
   try {
     const execStarted = Date.now();
-    const info = mode === 'self' ? await ready!.sendSelf() : await ready!.sendExternal();
+    const info = mode === 'self' ? await ready!.sendSelf(setPhase) : await ready!.sendExternal(setPhase);
     const execMs = Date.now() - execStarted;
     totals[mode].succeeded++;
     return { ok: true, id, mode, ...info, queueMs, execMs, totalMs: Date.now() - started };
@@ -293,6 +337,7 @@ const handleTx = async (mode: TxMode): Promise<TxResult> => {
       totalMs: Date.now() - started,
     };
   } finally {
+    inFlight.delete(id);
     release();
   }
 };
@@ -320,6 +365,12 @@ const server = createServer((req: IncomingMessage, res: ServerResponse) => {
         externalWallet: ready.externalInfo(),
         totals,
         concurrency: { size: semaphore.size, inUse: semaphore.inUse, queued: semaphore.queued },
+        inFlight: Array.from(inFlight.entries()).map(([id, f]) => ({
+          id,
+          mode: f.mode,
+          phase: f.phase,
+          forMs: Date.now() - f.since,
+        })),
       });
     }
     if (req.method === 'GET' && url.pathname === '/pending') {

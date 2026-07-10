@@ -7,9 +7,9 @@ import { CompiledContract } from '@midnight-ntwrk/compact-js';
 import { type ContractAddress } from '@midnight-ntwrk/compact-runtime';
 import {
   createCallTxOptions,
+  createUnprovenCallTx,
   deployContract,
   findDeployedContract,
-  submitCallTxAsync,
 } from '@midnight-ntwrk/midnight-js/contracts';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -69,17 +69,17 @@ export const connectCounter = async (providers: CounterProviders, contractAddres
 };
 
 /**
- * Build, prove, balance and SUBMIT one `incrementBy(1)` call — without waiting
- * for finalization. The convenience `callTx` path waits via an indexer
- * subscription (`watchForTxData`) that races tx inclusion: when the tx
- * finalizes before the watcher connects, the event never fires and the call
- * hangs forever (reliably reproduced under concurrency). Callers should await
- * finalization through the wallet's own pending-transaction set instead.
+ * Build one UNPROVEN `incrementBy(1)` call transaction. The caller drives the
+ * remaining pipeline stages (prove → balance → submit → finalize) manually:
+ * the SDK's all-in-one paths hide where time is spent and both of their wait
+ * mechanisms proved hang-prone under concurrency (`callTx`'s indexer watch
+ * races tx inclusion; `wallet.submitTransaction`'s await sometimes never
+ * resolves even though the tx was broadcast and applied).
  */
-export const submitIncrementAsync = async (
+export const buildUnprovenIncrementTx = async (
   providers: CounterProviders,
   contractAddress: ContractAddress,
-): Promise<{ txHash: string }> => {
+): Promise<unknown> => {
   const options = createCallTxOptions(
     compiledContract(),
     'incrementBy' as never,
@@ -88,10 +88,14 @@ export const submitIncrementAsync = async (
     undefined,
     [1n] as never,
   );
-  const submitted = (await (
-    submitCallTxAsync as (p: CounterProviders, o: typeof options) => Promise<{ txId: string }>
-  )(providers, options)) as { txId: string };
-  return { txHash: submitted.txId };
+  providers.privateStateProvider.setContractAddress(contractAddress);
+  const unproven = (await (
+    createUnprovenCallTx as (
+      p: CounterProviders,
+      o: typeof options,
+    ) => Promise<{ private: { unprovenTx: unknown } }>
+  )(providers, options)) as { private: { unprovenTx: unknown } };
+  return unproven.private.unprovenTx;
 };
 
 export const readCount = async (
