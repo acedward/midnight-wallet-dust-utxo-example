@@ -45,7 +45,15 @@ const waitForReady = async () => {
     process.stdout.write('.');
     await sleep(3000);
   }
-  console.log(' ready.');
+  // Don't start measuring while the API is still draining txs from a previous
+  // run — queued work would contaminate the first waves' latencies.
+  for (;;) {
+    const s = await stats();
+    if (s && s.concurrency?.inUse === 0 && s.concurrency?.queued === 0) break;
+    process.stdout.write('~');
+    await sleep(5000);
+  }
+  console.log(' ready & idle.');
 };
 
 const one = async (mode) => {
