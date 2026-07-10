@@ -3,10 +3,9 @@
 How fast can a **single Midnight wallet** build, prove and send transactions to a node?
 
 This repo spins up a local Midnight **1.0.0** network (node + indexer + proof server) with
-Docker Compose, prepares a benchmark wallet with **20 NIGHT UTXOs** (each registered for
-dust generation in its own transaction, so the wallet has 20 independent dust streams to
-pay fees from in parallel), deploys a contract, and exposes an HTTP API you can load-test
-externally.
+Docker Compose, prepares a benchmark wallet with **20 NIGHT UTXOs** — each one an
+independent dust-generation stream, i.e. one concurrently-spendable fee source — deploys
+a contract, and exposes an HTTP API you can load-test externally.
 
 ## Stack (docker compose)
 
@@ -22,12 +21,17 @@ externally.
 
 1. Builds the **genesis wallet** (seed `…0001`, holds all dev-chain funds) and registers it
    for dust generation so it can pay fees.
-2. Creates a fresh **benchmark wallet** and funds it from genesis — batches of NIGHT
-   outputs sent as fast as the chain confirms them, until it holds **≥ 20 UTXOs**.
-3. Registers each benchmark-wallet NIGHT UTXO for dust generation — **one transaction per
-   UTXO**. (A single registration tx spending N inputs consolidates them into fewer
-   registered outputs — observed 20 → 2 — which would leave the wallet only 2 dust coins,
-   i.e. only 2 concurrent fee payments.)
+2. Creates a fresh **benchmark wallet**, funds it with **one seed UTXO**, and registers its
+   night **address** for dust generation — a single transaction.
+3. Funds it from genesis with **20 NIGHT outputs** — batches sent as fast as the chain
+   confirms them. Dust registration is **address-level** on the ledger
+   (`DustRegistration.night_key` → `address_delegation` map): every NIGHT UTXO received
+   *after* registration automatically becomes its own dust-generation stream (ledger
+   `dust.rs` calls `fresh_dust_output` for each new NIGHT output of a delegated owner).
+   20 UTXOs ⇒ 20 dust coins ⇒ 20 fees payable **in parallel**.
+   ⚠️ Order matters: UTXOs that pre-date the registration do NOT generate — the SDK has
+   to "rotate" them (spend + recreate), and that rotation consolidates them into at most
+   2 outputs (observed 20 → 2, i.e. only 2 dust coins). Register first, fund after.
 4. Creates and funds an **external wallet** the same way, but does **not** register it for
    dust — it has no way to pay fees, which is exactly test case B.
 5. Deploys the **public-counter** contract. Its `count: Counter` is a commutative ledger
@@ -49,8 +53,8 @@ waits for inclusion.
 ## Usage
 
 ```bash
-docker compose up -d --build        # start the stack (setup takes ~15 min:
-                                    #   funding + 20 per-utxo dust registrations)
+docker compose up -d --build        # start the stack (setup takes ~5 min:
+                                    #   register → fund 20 UTXOs → deploy)
 curl localhost:3300/health          # → {"ready": true} when setup is done
 curl localhost:3300/stats           # wallet balances, dust coins, counter value
 

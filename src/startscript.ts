@@ -4,10 +4,13 @@
  * 1. Build the genesis wallet (holds all funds on the dev chain) and register
  *    it for dust generation so it can pay fees.
  * 2. Create a fresh benchmark wallet.
- * 3. Fund it from genesis with at least TARGET_UTXOS separate NIGHT outputs,
- *    sending the batches as fast as the chain accepts them.
- * 4. Register the benchmark wallet's NIGHT UTXOs for dust generation
- *    (one tx per UTXO, so each stays an independent dust stream).
+ * 3. Fund it with ONE seed UTXO and register its night address for dust
+ *    generation (a single tx). Dust registration is address-level on the
+ *    ledger: every NIGHT UTXO received AFTER registration automatically
+ *    becomes its own dust-generation stream — no re-registration needed.
+ * 4. Fund it from genesis with TARGET_UTXOS separate NIGHT outputs, sending
+ *    the batches as fast as the chain accepts them. Each arriving output
+ *    auto-generates dust (one dust coin each = parallel fee capacity).
  * 5. Create and fund an "external" wallet the same way — but do NOT register
  *    it for dust: it builds transactions with { payFees: false } and the
  *    benchmark wallet balances the missing dust for it (test case B).
@@ -27,6 +30,7 @@ import {
   nightBalance,
   registerForDustGeneration,
   unshieldedAddressOf,
+  waitForDustCoins,
   waitForFunds,
   waitForSync,
   waitForUtxoCount,
@@ -100,34 +104,44 @@ const main = async (): Promise<void> => {
   const externalAddr = unshieldedAddressOf(external);
   log(`external wallet ready: ${externalAddr.encoded}`);
 
-  // 3. Fund both: batches of NIGHT until each holds >= TARGET_UTXOS UTXOs,
-  //    sent back-to-back as fast as the chain confirms them (each new batch
-  //    spends genesis change, so a batch must land before the next is built).
   const amountPerUtxo = BigInt(process.env.AMOUNT_PER_UTXO ?? String(genesisFunds / BigInt(TARGET_UTXOS * 4)));
-  const fund = async (name: string, target: ReturnType<typeof unshieldedAddressOf>, wallet: WalletContext) => {
+
+  // Fund a wallet with `count` NIGHT outputs, batches sent back-to-back as
+  // fast as the chain confirms them (each new batch spends genesis change, so
+  // a batch must land before the next is built).
+  const fund = async (name: string, target: ReturnType<typeof unshieldedAddressOf>, wallet: WalletContext, count: number) => {
+    const base = (await firstSyncedState(wallet.wallet)).unshielded.availableCoins.length;
     let sent = 0;
-    while (sent < TARGET_UTXOS) {
-      const count = Math.min(OUTPUTS_PER_TX, TARGET_UTXOS - sent);
-      const txId = await sendBatch(genesis, target.address, amountPerUtxo, count);
-      sent += count;
-      log(`${name} funding tx submitted (${count} outputs of ${amountPerUtxo} NIGHT atoms): ${txId}`);
+    while (sent < count) {
+      const n = Math.min(OUTPUTS_PER_TX, count - sent);
+      const txId = await sendBatch(genesis, target.address, amountPerUtxo, n);
+      sent += n;
+      log(`${name} funding tx submitted (${n} outputs of ${amountPerUtxo} NIGHT atoms): ${txId}`);
       // Wait until the receiving wallet sees the new outputs before sending more.
-      await waitForUtxoCount(wallet.wallet, sent);
-      log(`${name} wallet now holds ${sent}+ NIGHT UTXOs`);
+      await waitForUtxoCount(wallet.wallet, base + sent);
+      log(`${name} wallet now holds ${base + sent}+ NIGHT UTXOs`);
     }
   };
-  await fund('benchmark', benchAddr, bench);
-  await fund('external', externalAddr, external);
 
-  // 4. Register the benchmark wallet's UTXOs for dust generation — one tx per
-  //    UTXO so each stays an independent dust stream (parallel fee capacity).
-  //    The external wallet is deliberately NOT registered: it has no dust and
-  //    must build transactions with { payFees: false }.
-  log('registering benchmark wallet NIGHT UTXOs for dust generation…');
+  // 3. Seed + register the benchmark wallet's night ADDRESS (single tx).
+  //    Registration is address-level: everything funded after this point
+  //    auto-generates dust — no further registrations needed.
+  await fund('benchmark(seed)', benchAddr, bench, 1);
+  log('registering benchmark wallet address for dust generation…');
   await registerForDustGeneration(bench, log);
-  const benchState = await firstSyncedState(bench.wallet);
+  log('benchmark wallet registered — subsequent NIGHT deposits auto-generate dust');
+
+  // 4. Fund both wallets. The external wallet is deliberately NOT registered:
+  //    it has no dust and must build transactions with { payFees: false }.
+  await fund('benchmark', benchAddr, bench, TARGET_UTXOS);
+  await fund('external', externalAddr, external, TARGET_UTXOS);
+
+  // Every post-registration deposit becomes its own dust-generation stream;
+  // wait until they are all live (dust coins = parallel fee capacity).
+  const benchState = await waitForDustCoins(bench.wallet, TARGET_UTXOS);
   log(
     `benchmark wallet dust generation active: utxos=${benchState.unshielded.availableCoins.length} ` +
+      `dustCoins=${benchState.dust.availableCoins.length} ` +
       `night=${nightBalance(benchState)} dust=${benchState.dust.balance(new Date())}`,
   );
 
