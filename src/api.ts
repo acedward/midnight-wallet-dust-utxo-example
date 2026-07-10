@@ -283,6 +283,13 @@ const init = async (): Promise<void> => {
     if (signed.type !== 'UNPROVEN_TRANSACTION') throw new Error(`unexpected recipe type: ${signed.type}`);
 
     // 2. Benchmark wallet balances the missing dust/gas and finalizes (proves).
+    //    NOTE (measured): this facade path completes in quantized ~30s batches
+    //    under concurrency, capping external mode at ~0.2 tx/s regardless of
+    //    the external wallet's UTXO count (20 vs 100 made no difference).
+    //    Routing the heavy proof through the midnight-js proof client instead
+    //    did not remove the quantization — the gate sits in the facade's dust
+    //    balancing of txs that carry unshielded offers (self-mode contract
+    //    calls, which carry none, scale smoothly through the same wallet).
     setPhase('balance');
     const balanced = await bench.wallet.balanceUnprovenTransaction(
       signed.transaction,

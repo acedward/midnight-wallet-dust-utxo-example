@@ -66,8 +66,10 @@ export const buildWallet = async (cfg: NetworkConfig, seed: string): Promise<Wal
     relayURL: new URL(cfg.node.replace(/^http/, 'ws')),
     txHistoryStorage: new InMemoryTransactionHistoryStorage(TransactionHistoryStorage.TransactionHistoryCommonSchema),
     costParameters: {
-      additionalFeeOverhead: 300_000_000_000_000n,
-      feeBlocksMargin: 5,
+      additionalFeeOverhead: BigInt(process.env.FEE_OVERHEAD ?? 300_000_000_000_000n),
+      // 5 blocks × ~6s = the exact 30s quantization observed in external-mode
+      // dust balancing under concurrency; tunable to probe/relax that gate.
+      feeBlocksMargin: Number(process.env.FEE_BLOCKS_MARGIN ?? 5),
     },
   };
 

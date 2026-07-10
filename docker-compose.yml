@@ -104,6 +104,7 @@ services:
       STATE_FILE: '/shared/state.json'
       PORT: '3300'
       TX_CONCURRENCY: '${TX_CONCURRENCY:-8}'
+      FEE_BLOCKS_MARGIN: '${FEE_BLOCKS_MARGIN:-5}'
     volumes:
       - shared:/shared
     depends_on:
