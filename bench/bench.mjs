@@ -13,6 +13,11 @@
  *   node bench/bench.mjs [--api http://127.0.0.1:3300] [--waves 1,5,20,50,100] [--modes self,external]
  */
 import { writeFileSync } from 'node:fs';
+import { Agent, setGlobalDispatcher } from 'undici';
+
+// Requests legitimately take many minutes under load; undici's default
+// headersTimeout/bodyTimeout (5 min) would kill them client-side.
+setGlobalDispatcher(new Agent({ headersTimeout: 0, bodyTimeout: 0 }));
 
 const arg = (name, fallback) => {
   const i = process.argv.indexOf(`--${name}`);
@@ -22,7 +27,7 @@ const arg = (name, fallback) => {
 const API = arg('api', process.env.API_URL ?? 'http://127.0.0.1:3300');
 const WAVES = arg('waves', '1,5,20,50,100').split(',').map(Number);
 const MODES = arg('modes', 'self,external').split(',');
-const REQUEST_TIMEOUT_MS = Number(arg('timeout', 15 * 60_000));
+const REQUEST_TIMEOUT_MS = Number(arg('timeout', 45 * 60_000));
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
