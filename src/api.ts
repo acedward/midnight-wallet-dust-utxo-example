@@ -179,7 +179,7 @@ const init = async (): Promise<void> => {
    * its own pending transactions and always observes their resolution.
    */
   const waitForFinalization = async (ids: readonly string[], txHash: string): Promise<void> => {
-    await Rx.firstValueFrom(
+    const finalized = Rx.firstValueFrom(
       bench.wallet.state().pipe(
         Rx.filter((s) => s.isSynced),
         Rx.filter((s) => {
@@ -187,16 +187,29 @@ const init = async (): Promise<void> => {
           for (const item of items) {
             const itemIds = item.tx.identifiers();
             if (ids.some((id) => itemIds.includes(id))) {
+              // A CheckedItem carries the on-chain result while still listed;
+              // SUCCESS means finalized — only result-less items are pending.
               const result = (item as { result?: { status?: string } }).result;
+              if (result?.status === 'SUCCESS' || result?.status === 'PARTIAL_SUCCESS') return true;
               if (result?.status === 'FAILURE') throw new Error(`transaction failed on-chain: ${txHash}`);
-              return false; // still pending
+              return false; // no result yet → still pending
             }
           }
-          return true; // no longer pending → finalized
+          return true; // no longer listed → finalized (cleared)
         }),
-        Rx.timeout({ first: 10 * 60_000 }),
       ),
     );
+    // Overall deadline (Rx.timeout({first}) only bounds the FIRST emission —
+    // the state stream emits continuously, so it never fires here).
+    let timer: NodeJS.Timeout | undefined;
+    const deadline = new Promise<never>((_resolve, reject) => {
+      timer = setTimeout(() => reject(new Error(`finalization not observed within 10min: ${txHash}`)), 10 * 60_000);
+    });
+    try {
+      await Promise.race([finalized, deadline]);
+    } finally {
+      clearTimeout(timer);
+    }
   };
 
   /**
@@ -307,6 +320,16 @@ const server = createServer((req: IncomingMessage, res: ServerResponse) => {
         externalWallet: ready.externalInfo(),
         totals,
         concurrency: { size: semaphore.size, inUse: semaphore.inUse, queued: semaphore.queued },
+      });
+    }
+    if (req.method === 'GET' && url.pathname === '/pending') {
+      if (!ready) return json(res, 503, { ready: false });
+      const s = await firstSyncedState(ready.bench.wallet);
+      return json(res, 200, {
+        pending: s.pending.all.map((item) => ({
+          ids: item.tx.identifiers(),
+          result: (item as { result?: { status?: string } }).result?.status ?? null,
+        })),
       });
     }
     if (req.method === 'POST' && url.pathname === '/tx') {
