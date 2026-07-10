@@ -317,6 +317,11 @@ const server = createServer((req: IncomingMessage, res: ServerResponse) => {
   });
 });
 
+// Requests legitimately take minutes under load (queue + prove + finalize);
+// Node's default requestTimeout (5 min) would destroy the socket mid-flight.
+server.requestTimeout = 0;
+server.headersTimeout = 60_000;
+
 server.listen(PORT, () => log(`listening on :${PORT} (initializing…)`));
 
 init().catch((err: unknown) => {
