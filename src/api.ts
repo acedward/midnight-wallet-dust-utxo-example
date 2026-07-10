@@ -22,7 +22,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import * as Rx from 'rxjs';
 import { configFromEnv, type RunState, STATE_FILE } from './network.js';
-import { counterProviders, readCount, submitIncrementAsync, type CounterProviders } from './counter.js';
+import { connectCounter, counterProviders, readCount, submitIncrementAsync, type CounterProviders } from './counter.js';
 import {
   buildWallet,
   firstSyncedState,
@@ -135,9 +135,10 @@ const init = async (): Promise<void> => {
   log('external wallet synced and funded');
 
   const providers = await counterProviders(bench, cfg);
-  const count = await readCount(providers, state.contractAddress);
-  if (count == null) throw new Error(`public-counter not found at ${state.contractAddress}`);
-  log(`connected to public-counter at ${state.contractAddress} (count=${count})`);
+  // Verifies the deployment AND seeds the (vacant) private state into the
+  // provider — createUnprovenCallTx requires an entry at the private state ID.
+  await connectCounter(providers, state.contractAddress);
+  log(`connected to public-counter at ${state.contractAddress}`);
 
   const track = (ctx: WalletContext) => {
     let latest: Awaited<ReturnType<typeof firstSyncedState>>;
