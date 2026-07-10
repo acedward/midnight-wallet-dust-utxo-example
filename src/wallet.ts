@@ -187,3 +187,10 @@ export const unshieldedAddressOf = (
 /** Parse a bech32m unshielded address string into the SDK's `UnshieldedAddress`. */
 export const parseUnshieldedAddress = (input: string): UnshieldedAddress =>
   MidnightBech32m.parse(input.trim()).decode(UnshieldedAddress, getNetworkId());
+
+/** Derive the unshielded address for a seed without building a wallet (e.g. throwaway sink addresses). */
+export const deriveUnshieldedAddress = (seed: string): UnshieldedAddress => {
+  const keys = deriveKeysFromSeed(seed);
+  const keystore = createKeystore(keys[Roles.NightExternal], getNetworkId());
+  return keystore.getBech32Address().decode(UnshieldedAddress, getNetworkId());
+};

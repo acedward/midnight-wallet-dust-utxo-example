@@ -31,9 +31,10 @@ import {
 } from './counter.js';
 import {
   buildWallet,
+  deriveUnshieldedAddress,
   firstSyncedState,
+  generateFreshSeed,
   nightBalance,
-  parseUnshieldedAddress,
   waitForFunds,
   waitForSync,
   type WalletContext,
@@ -177,7 +178,11 @@ const init = async (): Promise<void> => {
     };
   };
 
-  const benchAddress = parseUnshieldedAddress(state.address);
+  // Transfers go to a throwaway SINK address — never to the benchmark wallet.
+  // (Sending them to the benchmark wallet litters it with micro NIGHT UTXOs
+  // that each auto-generate a near-worthless dust coin, degrading its dust
+  // coin selection over time: observed "could not balance dust" failures.)
+  const sinkAddress = deriveUnshieldedAddress(generateFreshSeed());
   const night = unshieldedToken().raw;
   const externalTransferAmount = BigInt(process.env.EXTERNAL_TRANSFER_AMOUNT ?? 1_000_000);
 
@@ -279,7 +284,7 @@ const init = async (): Promise<void> => {
     // 1. External wallet builds, signs and proves the fee-less transaction.
     setPhase('external-build');
     const recipe = await external.wallet.transferTransaction(
-      [{ type: 'unshielded', outputs: [{ type: night, receiverAddress: benchAddress, amount: externalTransferAmount }] }],
+      [{ type: 'unshielded', outputs: [{ type: night, receiverAddress: sinkAddress, amount: externalTransferAmount }] }],
       { shieldedSecretKeys: external.shieldedSecretKeys, dustSecretKey: external.dustSecretKey },
       { ttl, payFees: false },
     );
