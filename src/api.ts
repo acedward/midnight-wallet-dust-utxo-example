@@ -266,13 +266,17 @@ const init = async (): Promise<void> => {
   };
 
   /**
-   * Test case B: the external wallet creates and signs a NIGHT transfer with
-   * { payFees: false } (it holds no dust); the benchmark wallet balances the
-   * missing dust fee, proves/finalizes, submits, and waits for finalization.
+   * Test case B: the EXTERNAL wallet creates, signs and PROVES a NIGHT
+   * transfer with { payFees: false } — a proven, bound, but UNBALANCED
+   * transaction (it holds no dust, so it cannot pay fees). The benchmark
+   * wallet then only balances the missing dust/gas onto the finished tx
+   * (`balanceFinalizedTransaction` — proving just the small balancing intent),
+   * submits, and waits for finalization. The creator carries the heavy
+   * proving cost; the balancer's work is fee balancing + submission only.
    */
   const sendExternal = async (setPhase: SetPhase): Promise<{ txHash: string }> => {
     const ttl = new Date(Date.now() + 30 * 60 * 1000);
-    // 1. External wallet builds the fee-less transaction and signs its inputs.
+    // 1. External wallet builds, signs and proves the fee-less transaction.
     setPhase('external-build');
     const recipe = await external.wallet.transferTransaction(
       [{ type: 'unshielded', outputs: [{ type: night, receiverAddress: benchAddress, amount: externalTransferAmount }] }],
@@ -280,24 +284,19 @@ const init = async (): Promise<void> => {
       { ttl, payFees: false },
     );
     const signed = await external.wallet.signRecipe(recipe, (payload) => external.unshieldedKeystore.signData(payload));
-    if (signed.type !== 'UNPROVEN_TRANSACTION') throw new Error(`unexpected recipe type: ${signed.type}`);
+    setPhase('external-prove');
+    const provenUnbalanced = await external.wallet.finalizeRecipe(signed);
 
-    // 2. Benchmark wallet balances the missing dust/gas and finalizes (proves).
-    //    NOTE (measured): this facade path completes in quantized ~30s batches
-    //    under concurrency, capping external mode at ~0.2 tx/s regardless of
-    //    the external wallet's UTXO count (20 vs 100 made no difference).
-    //    Routing the heavy proof through the midnight-js proof client instead
-    //    did not remove the quantization — the gate sits in the facade's dust
-    //    balancing of txs that carry unshielded offers (self-mode contract
-    //    calls, which carry none, scale smoothly through the same wallet).
+    // 2. Benchmark wallet balances the missing dust/gas onto the proven tx —
+    //    only the balancing intent itself remains to be proved.
     setPhase('balance');
-    const balanced = await bench.wallet.balanceUnprovenTransaction(
-      signed.transaction,
+    const balancedRecipe = await bench.wallet.balanceFinalizedTransaction(
+      provenUnbalanced,
       { shieldedSecretKeys: bench.shieldedSecretKeys, dustSecretKey: bench.dustSecretKey },
       { ttl },
     );
-    setPhase('prove');
-    const finalized = await bench.wallet.finalizeRecipe(balanced);
+    setPhase('prove-balance');
+    const finalized = await bench.wallet.finalizeRecipe(balancedRecipe);
 
     // 3. Same submit + finalization semantics as test case A.
     return submitAndFinalize(finalized, setPhase);
