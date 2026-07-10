@@ -1,6 +1,5 @@
 node_modules/
 dist/
-results.md
 .env
 *.log
 midnight-level-db/
