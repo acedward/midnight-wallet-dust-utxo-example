@@ -22,7 +22,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import * as Rx from 'rxjs';
 import { configFromEnv, type RunState, STATE_FILE } from './network.js';
-import { connectCounter, counterProviders, readCount, type CounterProviders } from './counter.js';
+import { counterProviders, readCount, submitIncrementAsync, type CounterProviders } from './counter.js';
 import {
   buildWallet,
   firstSyncedState,
@@ -79,7 +79,6 @@ interface TxResult {
   readonly id: number;
   readonly mode: TxMode;
   readonly txHash?: string;
-  readonly blockHeight?: number;
   readonly error?: string;
   /** ms spent waiting for a concurrency slot */
   readonly queueMs: number;
@@ -99,12 +98,11 @@ interface WalletSummary {
 interface Ready {
   readonly state: RunState;
   readonly providers: CounterProviders;
-  // deployed contract handle — callTx typed loosely; the generics don't survive our minimal factory
-  readonly counter: { callTx: { incrementBy: (n: bigint) => Promise<unknown> } };
   readonly bench: WalletContext;
   readonly external: WalletContext;
   readonly benchInfo: () => WalletSummary;
   readonly externalInfo: () => WalletSummary;
+  readonly sendSelf: () => Promise<{ txHash: string }>;
   readonly sendExternal: () => Promise<{ txHash: string }>;
 }
 
@@ -137,8 +135,9 @@ const init = async (): Promise<void> => {
   log('external wallet synced and funded');
 
   const providers = await counterProviders(bench, cfg);
-  const counter = (await connectCounter(providers, state.contractAddress)) as unknown as Ready['counter'];
-  log(`connected to public-counter at ${state.contractAddress}`);
+  const count = await readCount(providers, state.contractAddress);
+  if (count == null) throw new Error(`public-counter not found at ${state.contractAddress}`);
+  log(`connected to public-counter at ${state.contractAddress} (count=${count})`);
 
   const track = (ctx: WalletContext) => {
     let latest: Awaited<ReturnType<typeof firstSyncedState>>;
@@ -172,6 +171,45 @@ const init = async (): Promise<void> => {
   const externalTransferAmount = BigInt(process.env.EXTERNAL_TRANSFER_AMOUNT ?? 1_000_000);
 
   /**
+   * Wait until a submitted tx leaves the benchmark wallet's pending set
+   * (applied on-chain). This is the reliable finalization signal: unlike the
+   * indexer `watchForTxData` subscription (which races tx inclusion and hangs
+   * forever when the tx lands before the watcher connects), the wallet tracks
+   * its own pending transactions and always observes their resolution.
+   */
+  const waitForFinalization = async (ids: readonly string[], txHash: string): Promise<void> => {
+    await Rx.firstValueFrom(
+      bench.wallet.state().pipe(
+        Rx.filter((s) => s.isSynced),
+        Rx.filter((s) => {
+          const items = s.pending.all;
+          for (const item of items) {
+            const itemIds = item.tx.identifiers();
+            if (ids.some((id) => itemIds.includes(id))) {
+              const result = (item as { result?: { status?: string } }).result;
+              if (result?.status === 'FAILURE') throw new Error(`transaction failed on-chain: ${txHash}`);
+              return false; // still pending
+            }
+          }
+          return true; // no longer pending → finalized
+        }),
+        Rx.timeout({ first: 10 * 60_000 }),
+      ),
+    );
+  };
+
+  /**
+   * Test case A: the benchmark wallet creates the ENTIRE transaction — one
+   * `incrementBy(1)` contract call (build → prove → balance dust → submit),
+   * then waits for on-chain finalization.
+   */
+  const sendSelf = async (): Promise<{ txHash: string }> => {
+    const { txHash } = await submitIncrementAsync(providers, state.contractAddress);
+    await waitForFinalization([txHash], txHash);
+    return { txHash };
+  };
+
+  /**
    * Test case B: the external wallet creates and signs a NIGHT transfer with
    * { payFees: false } (it holds no dust); the benchmark wallet balances the
    * missing dust fee, proves/finalizes, submits, and waits for finalization.
@@ -197,51 +235,22 @@ const init = async (): Promise<void> => {
     const ids = finalized.identifiers();
     const txHash = await bench.wallet.submitTransaction(finalized);
 
-    // 3. Wait until the tx leaves the benchmark wallet's pending set (applied
-    //    on-chain), so "complete" means the same thing as in test case A.
-    await Rx.firstValueFrom(
-      bench.wallet.state().pipe(
-        Rx.filter((s) => s.isSynced),
-        Rx.filter((s) => {
-          const items = s.pending.all;
-          for (const item of items) {
-            const itemIds = item.tx.identifiers();
-            if (ids.some((id) => itemIds.includes(id))) {
-              const result = (item as { result?: { status?: string } }).result;
-              if (result?.status === 'FAILURE') throw new Error(`transaction failed on-chain: ${txHash}`);
-              return false; // still pending
-            }
-          }
-          return true; // no longer pending → finalized
-        }),
-        Rx.timeout({ first: 10 * 60_000 }),
-      ),
-    );
+    // 3. Same finalization semantics as test case A.
+    await waitForFinalization(ids, txHash);
     return { txHash };
   };
 
   ready = {
     state,
     providers,
-    counter,
     bench,
     external,
     benchInfo: () => summarize(state.address, benchTrack.latest),
     externalInfo: () => summarize(state.externalAddress, externalTrack.latest),
+    sendSelf,
     sendExternal,
   };
   log(`API ready on :${PORT} (tx concurrency=${TX_CONCURRENCY})`);
-};
-
-const extractTxInfo = (result: unknown): { txHash?: string; blockHeight?: number } => {
-  // FinalizedCallTxData shape: { public: { txHash, blockHeight, ... }, private: {...} } — probe defensively.
-  const pub = (result as { public?: Record<string, unknown> })?.public ?? (result as Record<string, unknown>);
-  if (!pub || typeof pub !== 'object') return {};
-  const rec = pub as Record<string, unknown>;
-  const txHash = typeof rec.txHash === 'string' ? rec.txHash : typeof rec.txId === 'string' ? rec.txId : undefined;
-  const blockHeight =
-    typeof rec.blockHeight === 'number' || typeof rec.blockHeight === 'bigint' ? Number(rec.blockHeight) : undefined;
-  return { txHash, blockHeight };
 };
 
 const handleTx = async (mode: TxMode): Promise<TxResult> => {
@@ -252,10 +261,7 @@ const handleTx = async (mode: TxMode): Promise<TxResult> => {
   const queueMs = Date.now() - started;
   try {
     const execStarted = Date.now();
-    const info =
-      mode === 'self'
-        ? extractTxInfo(await ready!.counter.callTx.incrementBy(1n))
-        : await ready!.sendExternal();
+    const info = mode === 'self' ? await ready!.sendSelf() : await ready!.sendExternal();
     const execMs = Date.now() - execStarted;
     totals[mode].succeeded++;
     return { ok: true, id, mode, ...info, queueMs, execMs, totalMs: Date.now() - started };

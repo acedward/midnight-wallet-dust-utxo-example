@@ -5,7 +5,12 @@
  */
 import { CompiledContract } from '@midnight-ntwrk/compact-js';
 import { type ContractAddress } from '@midnight-ntwrk/compact-runtime';
-import { deployContract, findDeployedContract } from '@midnight-ntwrk/midnight-js/contracts';
+import {
+  createCallTxOptions,
+  deployContract,
+  findDeployedContract,
+  submitCallTxAsync,
+} from '@midnight-ntwrk/midnight-js/contracts';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import * as PublicCounter from '../contracts/managed/public-counter/contract/index.js';
@@ -61,6 +66,32 @@ export const connectCounter = async (providers: CounterProviders, contractAddres
   return await (
     findDeployedContract as (p: CounterProviders, o: typeof findOptions) => ReturnType<typeof findDeployedContract>
   )(providers, findOptions);
+};
+
+/**
+ * Build, prove, balance and SUBMIT one `incrementBy(1)` call — without waiting
+ * for finalization. The convenience `callTx` path waits via an indexer
+ * subscription (`watchForTxData`) that races tx inclusion: when the tx
+ * finalizes before the watcher connects, the event never fires and the call
+ * hangs forever (reliably reproduced under concurrency). Callers should await
+ * finalization through the wallet's own pending-transaction set instead.
+ */
+export const submitIncrementAsync = async (
+  providers: CounterProviders,
+  contractAddress: ContractAddress,
+): Promise<{ txHash: string }> => {
+  const options = createCallTxOptions(
+    compiledContract(),
+    'incrementBy' as never,
+    contractAddress,
+    PRIVATE_STATE_ID,
+    undefined,
+    [1n] as never,
+  );
+  const submitted = (await (
+    submitCallTxAsync as (p: CounterProviders, o: typeof options) => Promise<{ txId: string }>
+  )(providers, options)) as { txId: string };
+  return { txHash: submitted.txId };
 };
 
 export const readCount = async (
