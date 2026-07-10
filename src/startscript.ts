@@ -38,6 +38,8 @@ import {
 } from './wallet.js';
 
 const TARGET_UTXOS = Number(process.env.TARGET_UTXOS ?? 20);
+/** External wallet's UTXO pool. Its in-flight transfer capacity == this, so size it to the largest planned wave. */
+const EXTERNAL_UTXOS = Number(process.env.EXTERNAL_UTXOS ?? TARGET_UTXOS);
 const OUTPUTS_PER_TX = Number(process.env.OUTPUTS_PER_TX ?? 10);
 
 const t0 = Date.now();
@@ -104,7 +106,9 @@ const main = async (): Promise<void> => {
   const externalAddr = unshieldedAddressOf(external);
   log(`external wallet ready: ${externalAddr.encoded}`);
 
-  const amountPerUtxo = BigInt(process.env.AMOUNT_PER_UTXO ?? String(genesisFunds / BigInt(TARGET_UTXOS * 4)));
+  const amountPerUtxo = BigInt(
+    process.env.AMOUNT_PER_UTXO ?? String(genesisFunds / BigInt((TARGET_UTXOS + EXTERNAL_UTXOS) * 2)),
+  );
 
   // Fund a wallet with `count` NIGHT outputs, batches sent back-to-back as
   // fast as the chain confirms them (each new batch spends genesis change, so
@@ -134,7 +138,7 @@ const main = async (): Promise<void> => {
   // 4. Fund both wallets. The external wallet is deliberately NOT registered:
   //    it has no dust and must build transactions with { payFees: false }.
   await fund('benchmark', benchAddr, bench, TARGET_UTXOS);
-  await fund('external', externalAddr, external, TARGET_UTXOS);
+  await fund('external', externalAddr, external, EXTERNAL_UTXOS);
 
   // Every post-registration deposit becomes its own dust-generation stream;
   // wait until they are all live (dust coins = parallel fee capacity).

@@ -77,6 +77,7 @@ services:
       NETWORK_ID: 'undeployed'
       STATE_FILE: '/shared/state.json'
       TARGET_UTXOS: '${TARGET_UTXOS:-20}'
+      EXTERNAL_UTXOS: '${EXTERNAL_UTXOS:-}'
       OUTPUTS_PER_TX: '${OUTPUTS_PER_TX:-10}'
     volumes:
       - shared:/shared
