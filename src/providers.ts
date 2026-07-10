@@ -5,12 +5,53 @@
 import { type FinalizedTransaction } from '@midnight-ntwrk/ledger-v8';
 import { httpClientProofProvider } from '@midnight-ntwrk/midnight-js-http-client-proof-provider';
 import { indexerPublicDataProvider } from '@midnight-ntwrk/midnight-js-indexer-public-data-provider';
-import { levelPrivateStateProvider } from '@midnight-ntwrk/midnight-js-level-private-state-provider';
 import { NodeZkConfigProvider } from '@midnight-ntwrk/midnight-js-node-zk-config-provider';
-import { type MidnightProvider, type UnboundTransaction, type WalletProvider } from '@midnight-ntwrk/midnight-js/types';
-import { Buffer } from 'buffer';
+import {
+  type MidnightProvider,
+  type PrivateStateProvider,
+  type UnboundTransaction,
+  type WalletProvider,
+} from '@midnight-ntwrk/midnight-js/types';
 import { type NetworkConfig } from './network.js';
 import { firstSyncedState, type WalletContext } from './wallet.js';
+
+/**
+ * In-memory PrivateStateProvider. The level(-db) provider locks its database
+ * per operation and trips "Database failed to open" under concurrent contract
+ * calls; public-counter has no private state or witnesses, so a Map is all we
+ * need — and it keeps the benchmark free of disk I/O.
+ */
+export const inMemoryPrivateStateProvider = <PSI extends string, PS>(): PrivateStateProvider<PSI, PS> => {
+  const states = new Map<string, PS>();
+  const signingKeys = new Map<string, string>();
+  let contractAddress = '';
+  return {
+    setContractAddress(address: string): void {
+      contractAddress = address;
+    },
+    async set(privateStateId: PSI, state: PS): Promise<void> {
+      states.set(`${contractAddress}:${privateStateId}`, state);
+    },
+    async get(privateStateId: PSI): Promise<PS | null> {
+      return states.get(`${contractAddress}:${privateStateId}`) ?? null;
+    },
+    async remove(privateStateId: PSI): Promise<void> {
+      states.delete(`${contractAddress}:${privateStateId}`);
+    },
+    async clear(): Promise<void> {
+      states.clear();
+    },
+    async setSigningKey(address: string, signingKey: string): Promise<void> {
+      signingKeys.set(address, signingKey);
+    },
+    async getSigningKey(address: string): Promise<string | null> {
+      return signingKeys.get(address) ?? null;
+    },
+    async removeSigningKey(address: string): Promise<void> {
+      signingKeys.delete(address);
+    },
+  } as PrivateStateProvider<PSI, PS>;
+};
 
 export const createWalletAndMidnightProvider = async (
   ctx: WalletContext,
@@ -47,14 +88,8 @@ export const configureProviders = async <PSI extends string, CIRC extends string
 ) => {
   const wmp = await createWalletAndMidnightProvider(ctx);
   const zkConfigProvider = new NodeZkConfigProvider<CIRC>(wiring.zkConfigPath);
-  const accountId = wmp.getCoinPublicKey();
-  const storagePassword = `${Buffer.from(accountId, 'hex').toString('base64')}!`;
   return {
-    privateStateProvider: levelPrivateStateProvider<PSI>({
-      privateStateStoreName: wiring.privateStateStoreName,
-      accountId,
-      privateStoragePasswordProvider: () => storagePassword,
-    }),
+    privateStateProvider: inMemoryPrivateStateProvider<PSI, unknown>(),
     publicDataProvider: indexerPublicDataProvider(cfg.indexer, cfg.indexerWS),
     zkConfigProvider,
     proofProvider: httpClientProofProvider(cfg.proofServer, zkConfigProvider),

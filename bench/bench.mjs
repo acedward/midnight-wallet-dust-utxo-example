@@ -4,7 +4,13 @@
  * the fast-tx API (1, 5, 20, 50, 100 by default), measures wall time and
  * per-request latency, and prints a markdown results table.
  *
- *   node bench/bench.mjs [--api http://127.0.0.1:3300] [--waves 1,5,20,50,100]
+ * Two test cases (modes):
+ *   self     — the benchmark wallet creates the ENTIRE transaction
+ *              (contract call: build + prove + balance fees + submit)
+ *   external — an external wallet creates a transfer with { payFees: false };
+ *              the benchmark wallet only balances the missing dust and submits
+ *
+ *   node bench/bench.mjs [--api http://127.0.0.1:3300] [--waves 1,5,20,50,100] [--modes self,external]
  */
 import { writeFileSync } from 'node:fs';
 
@@ -15,6 +21,7 @@ const arg = (name, fallback) => {
 
 const API = arg('api', process.env.API_URL ?? 'http://127.0.0.1:3300');
 const WAVES = arg('waves', '1,5,20,50,100').split(',').map(Number);
+const MODES = arg('modes', 'self,external').split(',');
 const REQUEST_TIMEOUT_MS = Number(arg('timeout', 15 * 60_000));
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -36,10 +43,13 @@ const waitForReady = async () => {
   console.log(' ready.');
 };
 
-const one = async () => {
+const one = async (mode) => {
   const started = Date.now();
   try {
-    const res = await fetch(`${API}/tx`, { method: 'POST', signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) });
+    const res = await fetch(`${API}/tx?mode=${mode}`, {
+      method: 'POST',
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+    });
     const body = await res.json();
     return { ok: body.ok === true, latencyMs: Date.now() - started, error: body.error };
   } catch (err) {
@@ -57,11 +67,11 @@ const stats = async () => {
 
 const percentile = (sorted, p) => sorted[Math.min(sorted.length - 1, Math.floor((p / 100) * sorted.length))];
 
-const runWave = async (n) => {
-  console.log(`\n=== wave: ${n} concurrent request${n === 1 ? '' : 's'} ===`);
+const runWave = async (mode, n) => {
+  console.log(`\n=== [${mode}] wave: ${n} concurrent request${n === 1 ? '' : 's'} ===`);
   const before = await stats();
   const started = Date.now();
-  const results = await Promise.all(Array.from({ length: n }, one));
+  const results = await Promise.all(Array.from({ length: n }, () => one(mode)));
   const wallMs = Date.now() - started;
 
   const ok = results.filter((r) => r.ok).length;
@@ -72,6 +82,7 @@ const runWave = async (n) => {
 
   for (const r of results.filter((r) => !r.ok).slice(0, 3)) console.log(`  sample failure: ${r.error}`);
   const row = {
+    mode,
     n,
     ok,
     failed,
@@ -109,24 +120,33 @@ const main = async () => {
   await waitForReady();
   const initial = await stats();
   console.log(
-    `wallet: ${initial?.wallet?.address}\n` +
-      `utxos=${initial?.wallet?.utxos} night=${initial?.wallet?.night} dust=${initial?.wallet?.dust}\n` +
+    `benchmark wallet: ${initial?.wallet?.address}\n` +
+      `  utxos=${initial?.wallet?.utxos} night=${initial?.wallet?.night} ` +
+      `dust=${initial?.wallet?.dust} dustCoins=${initial?.wallet?.dustCoins}\n` +
+      `external wallet:  ${initial?.externalWallet?.address}\n` +
+      `  utxos=${initial?.externalWallet?.utxos} night=${initial?.externalWallet?.night} ` +
+      `dust=${initial?.externalWallet?.dust}\n` +
       `contract: ${initial?.contractAddress} (counter=${initial?.counter})`,
   );
 
-  const rows = [];
-  for (const n of WAVES) {
-    rows.push(await runWave(n));
+  const sections = [];
+  for (const mode of MODES) {
+    const rows = [];
+    for (const n of WAVES) {
+      rows.push(await runWave(mode, n));
+    }
+    const description =
+      mode === 'self'
+        ? 'The benchmark wallet creates the ENTIRE transaction — one `incrementBy(1)` contract call:\nbuild → prove (proof server) → balance fees (dust) → submit → finalized on-chain.'
+        : 'An EXTERNAL wallet creates a NIGHT transfer with `{ payFees: false }`; the benchmark wallet\nonly balances the missing dust/gas, finalizes, submits, and waits for on-chain inclusion.';
+    sections.push(`## mode: ${mode}\n\n${description}\n\n${table(rows)}`);
   }
 
   const md = `# fast-tx benchmark results
 
 Run: ${new Date().toISOString()}  ·  API: ${API}  ·  waves: ${WAVES.join(', ')}
 
-Each request = one \`incrementBy(1)\` call on the public-counter contract:
-build → prove (proof server) → balance fees (dust) → submit → finalized on-chain.
-
-${table(rows)}
+${sections.join('\n\n')}
 `;
   console.log(`\n${md}`);
   const out = new URL('../results.md', import.meta.url).pathname;

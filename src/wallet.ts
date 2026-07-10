@@ -117,31 +117,52 @@ export const waitForUtxoCount = (wallet: WalletFacade, count: number): Promise<F
     ),
   );
 
+const registeredUtxoCount = (state: FacadeState): number =>
+  state.unshielded.availableCoins.filter(
+    (coin: { meta?: { registeredForDustGeneration?: boolean } }) => coin.meta?.registeredForDustGeneration === true,
+  ).length;
+
 /**
  * Register all not-yet-registered NIGHT UTXOs for dust generation, then wait
  * until the dust balance is positive. No-op when there is nothing to register.
+ *
+ * Each UTXO is registered in its OWN transaction: a single registration tx
+ * spending N inputs consolidates them into fewer registered outputs (observed:
+ * 20 → 2), and each registered UTXO is one independent dust-generation stream
+ * — i.e. one dust coin the wallet can spend on fees concurrently. Per-UTXO
+ * registration preserves the wallet's parallel-fee capacity.
  */
-export const registerForDustGeneration = async (ctx: WalletContext): Promise<void> => {
+export const registerForDustGeneration = async (
+  ctx: WalletContext,
+  log: (msg: string) => void = () => undefined,
+): Promise<void> => {
   const state = await firstSyncedState(ctx.wallet);
 
+  const alreadyRegistered = registeredUtxoCount(state);
   const nightUtxos = state.unshielded.availableCoins.filter(
     (coin: { meta?: { registeredForDustGeneration?: boolean } }) => coin.meta?.registeredForDustGeneration !== true,
   );
   if (nightUtxos.length === 0) return;
 
-  const recipe = await ctx.wallet.registerNightUtxosForDustGeneration(
-    nightUtxos,
-    ctx.unshieldedKeystore.getPublicKey(),
-    (payload) => ctx.unshieldedKeystore.signData(payload),
-  );
-  const finalized = await ctx.wallet.finalizeRecipe(recipe);
-  await ctx.wallet.submitTransaction(finalized);
+  // Submit one registration tx per UTXO, back-to-back. Each spends a distinct
+  // input, so they never conflict and can all be in flight at once.
+  for (const [i, utxo] of nightUtxos.entries()) {
+    const recipe = await ctx.wallet.registerNightUtxosForDustGeneration(
+      [utxo],
+      ctx.unshieldedKeystore.getPublicKey(),
+      (payload) => ctx.unshieldedKeystore.signData(payload),
+    );
+    const finalized = await ctx.wallet.finalizeRecipe(recipe);
+    const txId = await ctx.wallet.submitTransaction(finalized);
+    log(`dust registration ${i + 1}/${nightUtxos.length} submitted: ${txId}`);
+  }
 
+  const wantRegistered = alreadyRegistered + nightUtxos.length;
   await Rx.firstValueFrom(
     ctx.wallet.state().pipe(
       Rx.throttleTime(2_000),
       Rx.filter((s) => s.isSynced),
-      Rx.filter((s) => s.dust.balance(new Date()) > 0n),
+      Rx.filter((s) => registeredUtxoCount(s) >= wantRegistered && s.dust.balance(new Date()) > 0n),
     ),
   );
 };

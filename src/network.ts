@@ -34,6 +34,10 @@ export interface RunState {
   readonly seed: string;
   /** Bech32m unshielded address of the benchmark wallet. */
   readonly address: string;
+  /** Hex seed of the external wallet (funded with NIGHT, NOT dust-registered — builds txs with payFees: false). */
+  readonly externalSeed: string;
+  /** Bech32m unshielded address of the external wallet. */
+  readonly externalAddress: string;
   /** Deployed public-counter contract address. */
   readonly contractAddress: string;
   /** Number of NIGHT UTXOs the test wallet was funded with. */

@@ -6,10 +6,14 @@
  * 2. Create a fresh benchmark wallet.
  * 3. Fund it from genesis with at least TARGET_UTXOS separate NIGHT outputs,
  *    sending the batches as fast as the chain accepts them.
- * 4. Register the benchmark wallet's NIGHT UTXOs for dust generation.
- * 5. Deploy the public-counter contract (from genesis, so the benchmark
+ * 4. Register the benchmark wallet's NIGHT UTXOs for dust generation
+ *    (one tx per UTXO, so each stays an independent dust stream).
+ * 5. Create and fund an "external" wallet the same way — but do NOT register
+ *    it for dust: it builds transactions with { payFees: false } and the
+ *    benchmark wallet balances the missing dust for it (test case B).
+ * 6. Deploy the public-counter contract (from genesis, so the benchmark
  *    wallet's dust is untouched).
- * 6. Write /shared/state.json for the API service, then exit 0.
+ * 7. Write /shared/state.json for the API service, then exit 0.
  */
 import { unshieldedToken } from '@midnight-ntwrk/ledger-v8';
 import { mkdirSync, renameSync, writeFileSync } from 'node:fs';
@@ -81,7 +85,7 @@ const main = async (): Promise<void> => {
   await registerForDustGeneration(genesis);
   log('genesis wallet registered for dust generation');
 
-  // 2. Fresh benchmark wallet.
+  // 2. Fresh benchmark + external wallets.
   const seed = process.env.BENCH_WALLET_SEED ?? generateFreshSeed();
   log('building benchmark wallet…');
   const bench = await buildWallet(cfg, seed);
@@ -89,24 +93,38 @@ const main = async (): Promise<void> => {
   const benchAddr = unshieldedAddressOf(bench);
   log(`benchmark wallet ready: ${benchAddr.encoded}`);
 
-  // 3. Fund it: batches of NIGHT until it holds >= TARGET_UTXOS UTXOs, sent
-  //    back-to-back as fast as the chain confirms them (each new batch spends
-  //    genesis change, so a batch must land before the next is built).
-  const amountPerUtxo = BigInt(process.env.AMOUNT_PER_UTXO ?? String(genesisFunds / BigInt(TARGET_UTXOS * 2)));
-  let sent = 0;
-  while (sent < TARGET_UTXOS) {
-    const count = Math.min(OUTPUTS_PER_TX, TARGET_UTXOS - sent);
-    const txId = await sendBatch(genesis, benchAddr.address, amountPerUtxo, count);
-    sent += count;
-    log(`funding tx submitted (${count} outputs of ${amountPerUtxo} NIGHT atoms): ${txId}`);
-    // Wait until the benchmark wallet sees the new outputs before sending more.
-    await waitForUtxoCount(bench.wallet, sent);
-    log(`benchmark wallet now holds ${sent}+ NIGHT UTXOs`);
-  }
+  const externalSeed = process.env.EXTERNAL_WALLET_SEED ?? generateFreshSeed();
+  log('building external wallet…');
+  const external = await buildWallet(cfg, externalSeed);
+  await waitForSync(external.wallet);
+  const externalAddr = unshieldedAddressOf(external);
+  log(`external wallet ready: ${externalAddr.encoded}`);
 
-  // 4. Register the benchmark wallet's UTXOs for dust generation.
+  // 3. Fund both: batches of NIGHT until each holds >= TARGET_UTXOS UTXOs,
+  //    sent back-to-back as fast as the chain confirms them (each new batch
+  //    spends genesis change, so a batch must land before the next is built).
+  const amountPerUtxo = BigInt(process.env.AMOUNT_PER_UTXO ?? String(genesisFunds / BigInt(TARGET_UTXOS * 4)));
+  const fund = async (name: string, target: ReturnType<typeof unshieldedAddressOf>, wallet: WalletContext) => {
+    let sent = 0;
+    while (sent < TARGET_UTXOS) {
+      const count = Math.min(OUTPUTS_PER_TX, TARGET_UTXOS - sent);
+      const txId = await sendBatch(genesis, target.address, amountPerUtxo, count);
+      sent += count;
+      log(`${name} funding tx submitted (${count} outputs of ${amountPerUtxo} NIGHT atoms): ${txId}`);
+      // Wait until the receiving wallet sees the new outputs before sending more.
+      await waitForUtxoCount(wallet.wallet, sent);
+      log(`${name} wallet now holds ${sent}+ NIGHT UTXOs`);
+    }
+  };
+  await fund('benchmark', benchAddr, bench);
+  await fund('external', externalAddr, external);
+
+  // 4. Register the benchmark wallet's UTXOs for dust generation — one tx per
+  //    UTXO so each stays an independent dust stream (parallel fee capacity).
+  //    The external wallet is deliberately NOT registered: it has no dust and
+  //    must build transactions with { payFees: false }.
   log('registering benchmark wallet NIGHT UTXOs for dust generation…');
-  await registerForDustGeneration(bench);
+  await registerForDustGeneration(bench, log);
   const benchState = await firstSyncedState(bench.wallet);
   log(
     `benchmark wallet dust generation active: utxos=${benchState.unshielded.availableCoins.length} ` +
@@ -124,6 +142,8 @@ const main = async (): Promise<void> => {
   const state: RunState = {
     seed,
     address: benchAddr.encoded,
+    externalSeed,
+    externalAddress: externalAddr.encoded,
     contractAddress,
     utxoCount: benchState.unshielded.availableCoins.length,
     createdAt: new Date().toISOString(),
@@ -134,7 +154,7 @@ const main = async (): Promise<void> => {
   renameSync(tmp, STATE_FILE);
   log(`state written to ${STATE_FILE} — startup complete`);
 
-  await Promise.allSettled([genesis.wallet.stop(), bench.wallet.stop()]);
+  await Promise.allSettled([genesis.wallet.stop(), bench.wallet.stop(), external.wallet.stop()]);
   process.exit(0);
 };
 
