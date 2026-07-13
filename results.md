@@ -102,3 +102,31 @@ Run: 2026-07-13T18:45:28.725Z
 |---:|---:|---:|---:|---:|---:|---:|---:|
 | 8 | 10 | 10 | 80 | 1.5 | 2 | 5+5 | 40 |
 | 10 | 8 | 0 | 0 | 1.2 | 0 |  | 0 |
+
+## Merged CONTRACT CALLS — the TS docs are wrong (empirically falsified)
+
+`ledger-v8.d.ts` says `merge` throws "if both transactions have contract interactions".
+The Rust implementation (`structure.rs::merge`) has NO such check — only network-id and
+segment-id-collision checks. Tested on-chain (counter delta verified via indexer each time):
+
+| calls merged into ONE tx | result | counter delta | prove+balance |
+|---:|---|---:|---:|
+| 2 / 4 / 8 / 12 / 16 / 20 | ✅ | +n each | ~0.5s |
+| 45 | ✅ | +45 | 1.0s |
+| 90 | ✅ | +90 | 1.7s |
+| **150** | ✅ | **+150** | 2.7s |
+| 200 / 250 / 300 | ✗ "exceeded block limit in transaction fee computation" | — | — |
+
+- **One merged transaction carried 150 contract calls** — 3.3× the previous per-block
+  record (45 separate txs) inside a single extrinsic, and the whole thing proves in
+  under 3 seconds.
+- Single-tx cost cap for counter calls sits between 150 and 200 (same superlinear
+  cost-model wall as transfers, but counter-call intents are far cheaper than transfer
+  intents: 150 vs ~9 mergeable).
+- Segment ids must be unique across the whole batch (birthday paradox at 100+ random
+  draws from 65534 — dedupe with a used-set).
+
+Revised throughput picture: batching via merge lifts the per-block ceiling for these
+contract calls from 45 to ~150+ ops (≈25 ops/s at 6s blocks), with proving cost per op
+collapsing (one balancing + shared envelope). The TS `@throws` doc for `merge` should be
+reported upstream as stale.

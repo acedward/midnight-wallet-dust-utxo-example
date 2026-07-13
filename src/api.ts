@@ -116,6 +116,7 @@ interface Ready {
   readonly sendExternal: (setPhase: SetPhase) => Promise<{ txHash: string }>;
   readonly burst: (n: number) => Promise<object>;
   readonly mergeBurst: (total: number, groupSize: number) => Promise<object>;
+  readonly mergeCallTest: (n: number) => Promise<object>;
 }
 
 let ready: Ready | null = null;
@@ -394,7 +395,10 @@ const init = async (): Promise<void> => {
    * ("key (segment_id) collision during intents merge"). Must run BEFORE
    * signing — signatures commit to the segment id.
    */
-  const randomizeSegment = (tx: ledger.UnprovenTransaction): ledger.UnprovenTransaction => {
+  const randomizeSegment = (
+    tx: ledger.UnprovenTransaction,
+    used?: Set<number>,
+  ): ledger.UnprovenTransaction => {
     const intent = tx.intents?.get(1);
     if (!intent) return tx;
     for (;;) {
@@ -405,14 +409,18 @@ const init = async (): Promise<void> => {
         intent as never,
       );
       const seg = [...(rebuilt.intents?.keys() ?? [])][0];
-      // Avoid segment 1: the fee-balancing tx the benchmark wallet merges in
-      // later is wallet-built and always sits at segment 1.
-      if (seg !== undefined && seg !== 1) return rebuilt;
+      // Avoid segment 1 (the wallet-built fee-balancing tx merged in later
+      // always sits there) and any segment already drawn in this batch —
+      // at ~100+ draws from 65534 the birthday paradox makes collisions real.
+      if (seg !== undefined && seg !== 1 && !used?.has(seg)) {
+        used?.add(seg);
+        return rebuilt;
+      }
     }
   };
 
   /** Create + sign one fee-less transfer from the external wallet (unproven, unbalanced). */
-  const createFeelessTransfer = async (opts: { randomSegment?: boolean } = {}) => {
+  const createFeelessTransfer = async (opts: { randomSegment?: boolean; usedSegments?: Set<number> } = {}) => {
     const ttl = new Date(Date.now() + 30 * 60 * 1000);
     const recipe = await external.wallet.transferTransaction(
       [{ type: 'unshielded', outputs: [{ type: night, receiverAddress: sinkAddress, amount: externalTransferAmount }] }],
@@ -420,7 +428,7 @@ const init = async (): Promise<void> => {
       { ttl, payFees: false },
     );
     if (recipe.type !== 'UNPROVEN_TRANSACTION') throw new Error(`unexpected recipe type: ${recipe.type}`);
-    const tx = opts.randomSegment ? randomizeSegment(recipe.transaction) : recipe.transaction;
+    const tx = opts.randomSegment ? randomizeSegment(recipe.transaction, opts.usedSegments) : recipe.transaction;
     const signed = await external.wallet.signRecipe(
       { type: 'UNPROVEN_TRANSACTION', transaction: tx },
       (payload) => external.unshieldedKeystore.signData(payload),
@@ -439,8 +447,9 @@ const init = async (): Promise<void> => {
   const mergeBurst = async (total: number, groupSize: number) => {
     const ttl = new Date(Date.now() + 30 * 60 * 1000);
     const t0 = Date.now();
+    const usedSegments = new Set<number>();
     const transfers = await Promise.all(
-      Array.from({ length: total }, () => createFeelessTransfer({ randomSegment: groupSize > 1 })),
+      Array.from({ length: total }, () => createFeelessTransfer({ randomSegment: groupSize > 1, usedSegments })),
     );
     const createMs = Date.now() - t0;
 
@@ -547,6 +556,75 @@ const init = async (): Promise<void> => {
     }
   };
 
+  /**
+   * Empirical test: can CONTRACT CALL transactions be merged? The ledger-v8
+   * TS docs say merge throws "if both transactions have contract
+   * interactions", but the Rust implementation only checks network id +
+   * segment-id collisions. Build n unproven increment calls, randomize
+   * segments, merge, prove the merged tx, balance once, submit, and read the
+   * counter delta — if it advances by n via one extrinsic, the docs are stale.
+   */
+  const mergeCallTest = async (n: number) => {
+    const ttl = new Date(Date.now() + 30 * 60 * 1000);
+    const before = await readCount(providers, state.contractAddress);
+    const t0 = Date.now();
+    const usedSegments = new Set<number>();
+    const calls = await Promise.all(
+      Array.from({ length: n }, async () => {
+        const unproven = (await buildUnprovenIncrementTx(
+          providers,
+          state.contractAddress,
+        )) as ledger.UnprovenTransaction;
+        return randomizeSegment(unproven, usedSegments);
+      }),
+    );
+    const buildMs = Date.now() - t0;
+    let merged: ledger.UnprovenTransaction;
+    try {
+      merged = calls.reduce((acc, tx) => acc.merge(tx));
+    } catch (err) {
+      return { ok: false, stage: 'merge', n, error: err instanceof Error ? err.message : String(err) };
+    }
+    const t1 = Date.now();
+    let finalized: { identifiers: () => string[] };
+    try {
+      const proven = await providers.proofProvider.proveTx(merged as never);
+      const recipe = await bench.wallet.balanceUnboundTransaction(
+        proven as never,
+        { shieldedSecretKeys: bench.shieldedSecretKeys, dustSecretKey: bench.dustSecretKey },
+        { ttl },
+      );
+      finalized = await bench.wallet.finalizeRecipe(recipe);
+    } catch (err) {
+      return { ok: false, stage: 'prove/balance', n, error: err instanceof Error ? err.message : String(err) };
+    }
+    const proveBalanceMs = Date.now() - t1;
+    const heightBeforeSubmit = await currentHeight();
+    try {
+      await Promise.race([
+        bench.wallet.submitTransaction(finalized as never),
+        new Promise<never>((_r, rej) => setTimeout(() => rej(new Error('submit-ack-timeout')), 30_000)),
+      ]).catch((e: unknown) => {
+        if (!String(e instanceof Error ? e.message : e).includes('submit-ack-timeout')) throw e;
+      });
+      await waitForFinalization(finalized.identifiers(), finalized.identifiers()[0] ?? '?');
+    } catch (err) {
+      return { ok: false, stage: 'submit/confirm', n, error: err instanceof Error ? err.message : String(err) };
+    }
+    const after = await readCount(providers, state.contractAddress);
+    return {
+      ok: true,
+      n,
+      counterBefore: before?.toString(),
+      counterAfter: after?.toString(),
+      counterDelta: after != null && before != null ? Number(after - before) : null,
+      buildMs,
+      proveBalanceMs,
+      heightBeforeSubmit,
+      heightAfterConfirm: await currentHeight(),
+    };
+  };
+
   ready = {
     state,
     providers,
@@ -558,6 +636,7 @@ const init = async (): Promise<void> => {
     sendExternal,
     burst,
     mergeBurst,
+    mergeCallTest,
   };
   log(`API ready on :${PORT} (tx concurrency=${TX_CONCURRENCY})`);
 };
@@ -635,6 +714,12 @@ const server = createServer((req: IncomingMessage, res: ServerResponse) => {
           result: (item as { result?: { status?: string } }).result?.status ?? null,
         })),
       });
+    }
+    if (req.method === 'POST' && url.pathname === '/merge-call-test') {
+      if (!ready) return json(res, 503, { ok: false, error: 'not ready' });
+      const n = Number(url.searchParams.get('n') ?? 2);
+      if (!Number.isInteger(n) || n < 2 || n > 500) return json(res, 400, { ok: false, error: 'n must be 2..500' });
+      return json(res, 200, await ready.mergeCallTest(n));
     }
     if (req.method === 'POST' && url.pathname === '/merge-burst') {
       if (!ready) return json(res, 503, { ok: false, error: 'not ready' });
