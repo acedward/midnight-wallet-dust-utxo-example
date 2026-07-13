@@ -64,6 +64,34 @@ services:
       EXTRA_ARGS: '-v'
     # distroless image: no shell for a healthcheck; consumers retry on the port instead
 
+  proof-server-2:
+    image: 'midnightntwrk/proof-server:${PROOF_TAG:-8.1.0}'
+    container_name: fast-tx-proof-server-2
+    environment:
+      RUST_BACKTRACE: 'full'
+      EXTRA_ARGS: '-v'
+
+  proof-server-3:
+    image: 'midnightntwrk/proof-server:${PROOF_TAG:-8.1.0}'
+    container_name: fast-tx-proof-server-3
+    environment:
+      RUST_BACKTRACE: 'full'
+      EXTRA_ARGS: '-v'
+
+  # Least-connections load balancer over the proof-server replicas — proving is
+  # stateless, so it scales horizontally. Point PROOF_SERVER_URL here.
+  proof-lb:
+    image: 'nginx:alpine'
+    container_name: fast-tx-proof-lb
+    volumes:
+      - ./proof-lb.conf:/etc/nginx/nginx.conf:ro
+    ports:
+      - '127.0.0.1:${PROOF_LB_PORT:-26310}:6300'
+    depends_on:
+      - proof-server
+      - proof-server-2
+      - proof-server-3
+
   startscript:
     build: .
     container_name: fast-tx-startscript
@@ -73,7 +101,7 @@ services:
       NODE_URL: 'http://node:9944'
       INDEXER_URL: 'http://indexer:8088/api/v4/graphql'
       INDEXER_WS_URL: 'ws://indexer:8088/api/v4/graphql/ws'
-      PROOF_SERVER_URL: 'http://proof-server:6300'
+      PROOF_SERVER_URL: 'http://proof-lb:6300'
       NETWORK_ID: 'undeployed'
       STATE_FILE: '/shared/state.json'
       TARGET_UTXOS: '${TARGET_UTXOS:-20}'
@@ -99,7 +127,7 @@ services:
       NODE_URL: 'http://node:9944'
       INDEXER_URL: 'http://indexer:8088/api/v4/graphql'
       INDEXER_WS_URL: 'ws://indexer:8088/api/v4/graphql/ws'
-      PROOF_SERVER_URL: 'http://proof-server:6300'
+      PROOF_SERVER_URL: 'http://proof-lb:6300'
       NETWORK_ID: 'undeployed'
       STATE_FILE: '/shared/state.json'
       PORT: '3300'
