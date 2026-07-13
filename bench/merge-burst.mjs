@@ -1,99 +1,59 @@
 #!/usr/bin/env node
 /**
- * Transaction.merge benchmark: same number of logical transfers, different
- * merge group sizes. Measures whether merging improves fee cost (one dust
- * proof per GROUP), block packing (one extrinsic per group), and total time.
+ * Transaction.merge benchmark for TRANSFERS: the same number of logical
+ * transfers, merged into groups of different sizes before submission.
+ * `--groups 1` is the no-merge baseline — directly comparable.
  *
- *   node bench/merge-burst.mjs [--api http://127.0.0.1:3300] [--node http://127.0.0.1:29944] \
- *                              [--total 90] [--groups 1,5,15,45]
+ * Each merged tx is balanced ONCE by the benchmark wallet (one dust coin +
+ * one dust proof per GROUP instead of per transfer).
+ *
+ *   node bench/merge-burst.mjs [--api URL] [--node URL] [--total 90] [--groups 1,5,8]
  */
-import { writeFileSync } from 'node:fs';
-import { Agent, setGlobalDispatcher } from 'undici';
+import { API, arg, canonicalRow, CANONICAL_HEADER, scanBlocks, sleep, waitForApiReady, writeResults } from './lib.mjs';
 
-setGlobalDispatcher(new Agent({ headersTimeout: 0, bodyTimeout: 0 }));
-
-const arg = (name, fallback) => {
-  const i = process.argv.indexOf(`--${name}`);
-  return i !== -1 && process.argv[i + 1] ? process.argv[i + 1] : fallback;
-};
-const API = arg('api', 'http://127.0.0.1:3300');
-const NODE = arg('node', 'http://127.0.0.1:29944');
 const TOTAL = Number(arg('total', 90));
-const GROUPS = arg('groups', '1,5,15,45').split(',').map(Number);
-const BASELINE = Number(arg('baseline', 3));
-
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-const rpc = async (method, params = []) => {
-  const res = await fetch(NODE, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ id: 1, jsonrpc: '2.0', method, params }),
-  });
-  return (await res.json()).result;
-};
-
-const blocksIn = async (from, to) => {
-  const rows = [];
-  for (let h = from; h <= to; h++) {
-    const hash = await rpc('chain_getBlockHash', [h]);
-    const block = await rpc('chain_getBlock', [hash]);
-    rows.push({ height: h, extrinsics: Math.max(0, block.block.extrinsics.length - BASELINE) });
-  }
-  return rows.filter((b) => b.extrinsics > 0);
-};
+const GROUPS = arg('groups', '1,5,8').split(',').map(Number);
 
 const main = async () => {
-  for (;;) {
-    const health = await fetch(`${API}/health`).then((r) => r.json()).catch(() => ({}));
-    if (health.ready) break;
-    process.stdout.write('.');
-    await sleep(5000);
-  }
-  console.log(`API ready. total=${TOTAL} transfers per config; group sizes: ${GROUPS.join(', ')}`);
-
-  const results = [];
+  await waitForApiReady();
+  console.log(`total=${TOTAL} transfers per config; group sizes: ${GROUPS.join(', ')}`);
+  const rows = [];
   for (const group of GROUPS) {
     console.log(`\n=== merge-burst: ${TOTAL} transfers as ${Math.ceil(TOTAL / group)} merged txs (group=${group}) ===`);
     const r = await fetch(`${API}/merge-burst?total=${TOTAL}&group=${group}`, { method: 'POST' }).then((x) => x.json());
     if (r.error) {
       console.log(`  failed: ${r.error}`);
-      results.push({ group, error: r.error });
+      rows.push({
+        experiment: 'merged transfers',
+        config: `${TOTAL} transfers, group=${group} — FAILED: ${r.error}`,
+        requested: TOTAL,
+        landed: 0,
+        wallS: 0,
+      });
       continue;
     }
-    const blocks = await blocksIn(r.heightBeforeSubmit, r.heightAfterConfirm + 1);
-    const maxTxsPerBlock = Math.max(0, ...blocks.map((b) => b.extrinsics));
+    const blocks = await scanBlocks(r.heightBeforeSubmit, r.heightAfterConfirm + 1);
     console.log(
-      `  merged=${r.mergedTxs} finalized=${r.finalizedMergedTxs} transfers=${r.transfersLanded}\n` +
-        `  create=${(r.createMs / 1000).toFixed(1)}s merge=${(r.mergeMs / 1000).toFixed(1)}s ` +
-        `balance+prove=${(r.balanceProveMs / 1000).toFixed(1)}s confirm=${(r.confirmMs / 1000).toFixed(1)}s\n` +
-        `  blocks: ${blocks.map((b) => `#${b.height}:${b.extrinsics}`).join(' ')}\n` +
-        `  → transfers/block (max): ${maxTxsPerBlock * group}`,
+      `  merged=${r.mergedTxs} finalized=${r.finalizedMergedTxs} ` +
+        `blocks: ${blocks.map((b) => `#${b.height}:${b.userTxs}`).join(' ')}`,
     );
     if (r.submitErrors?.length) console.log(`  submit errors: ${r.submitErrors.join(' | ')}`);
-    results.push({
-      group,
-      ...r,
-      blocksUsed: blocks.length,
-      distribution: blocks.map((b) => b.extrinsics).join('+'),
-      maxTransfersPerBlock: maxTxsPerBlock * group,
-    });
-    await sleep(15_000); // let external wallet change + dust coins recycle
+    const row = {
+      experiment: 'merged transfers',
+      config: group === 1 ? `${TOTAL} transfers, no merge (baseline)` : `${TOTAL} transfers, merged ×${group}`,
+      requested: TOTAL,
+      landed: r.transfersLanded,
+      wallS: (r.submitMs + r.confirmMs) / 1000,
+      blocks: blocks.length,
+      // ops = logical transfers: extrinsics per block × group size
+      maxOpsPerBlock: Math.max(0, ...blocks.map((b) => b.userTxs)) * group,
+    };
+    console.log(canonicalRow(row));
+    rows.push(row);
+    await sleep(15_000); // let external change + dust coins recycle
   }
-
-  const lines = [
-    `| group size | merged txs | finalized | transfers landed | balance+prove (s) | blocks | extrinsics/block | max transfers in one block |`,
-    '|---:|---:|---:|---:|---:|---:|---:|---:|',
-    ...results
-      .filter((r) => !r.error)
-      .map(
-        (r) =>
-          `| ${r.group} | ${r.mergedTxs} | ${r.finalizedMergedTxs} | ${r.transfersLanded} | ` +
-          `${(r.balanceProveMs / 1000).toFixed(1)} | ${r.blocksUsed} | ${r.distribution} | ${r.maxTransfersPerBlock} |`,
-      ),
-  ];
-  const md = `\n## Transaction.merge test (${TOTAL} transfers per config)\n\nRun: ${new Date().toISOString()}\n\n${lines.join('\n')}\n`;
-  console.log(md);
-  writeFileSync(new URL('../merge-results.md', import.meta.url).pathname, md);
+  console.log(['', ...CANONICAL_HEADER, ...rows.map(canonicalRow)].join('\n'));
+  writeResults('merge', 'Merged transfers vs unmerged baseline (Transaction.merge)', rows);
 };
 
 main().catch((err) => {
