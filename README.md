@@ -150,3 +150,22 @@ Pinned to the midnight-ref-ai **v1.0.0** slot: `@midnight-ntwrk/wallet-sdk` 1.1.
 `midnight-js` 4.1.1, `compact-js` 2.5.1, `ledger-v8` 8.1.0 — npm `overrides` hold the
 whole family (newer releases pull the unpublished `ledger-v9`). `contracts/managed/` is
 the precompiled `public-counter` (compactc 0.31).
+
+## Dust cost per transaction (measured via `POST /fees`)
+
+Exact fees from the ledger's own computation (`calculateTransactionFee`), on prepared-
+then-reverted txs. 1 DUST = 10^15 specks.
+
+| tx shape | fee (specks) | fee per op |
+|---|---:|---:|
+| contract call, single tx | 290 | 290 |
+| 45 calls merged in one tx | 4,952 | 110 |
+| 150 calls merged in one tx | 15,336 | 102 |
+| NIGHT transfer, balanced | 715 | 715 |
+
+With 62.8M NIGHT held, dust generation is 5.2×10^17 specks/s — ~15 orders of magnitude
+above fee spend, so on this dev chain the dust BALANCE never limits throughput. The
+practical dust constraints are per-coin: each in-flight tx locks one whole dust coin
+until its change matures (parallelism = coin count), and balancing reserves the
+`additionalFeeOverhead` margin (3×10^14 specks) per coin — which is why near-worthless
+dust coins from micro NIGHT UTXOs fail with "could not balance dust".

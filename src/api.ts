@@ -118,6 +118,7 @@ interface Ready {
   readonly mergeBurst: (total: number, groupSize: number) => Promise<object>;
   readonly mergeCallTest: (n: number) => Promise<object>;
   readonly sustained: (mode: 'single' | 'merged', total: number, group: number, concurrency: number) => Promise<object>;
+  readonly feeReport: () => Promise<object>;
 }
 
 let ready: Ready | null = null;
@@ -720,6 +721,72 @@ const init = async (): Promise<void> => {
     };
   };
 
+  /**
+   * Exact dust cost per transaction shape, via the ledger's own fee
+   * computation (`calculateTransactionFee`). Each shape is prepared (proved +
+   * balanced), measured, then REVERTED — nothing is submitted or consumed.
+   * Dust generation rate comes from `dust.balance(t)` being a projection:
+   * balance(now + 1h) − balance(now) = accrual per hour, read instantly.
+   */
+  const feeReport = async () => {
+    const SPECKS_PER_DUST = 1_000_000_000_000_000n; // 10^15 specks = 1 DUST
+    const fmt = (specks: bigint) => ({
+      specks: specks.toString(),
+      dust: Number((specks * 10_000n) / SPECKS_PER_DUST) / 10_000,
+    });
+
+    const measure = async (label: string, ops: number, prepare: () => Promise<{ identifiers: () => string[] }>) => {
+      const tx = await prepare();
+      try {
+        const fee = await bench.wallet.calculateTransactionFee(tx as never);
+        return { label, ops, fee: fmt(fee), feePerOp: fmt(fee / BigInt(ops)) };
+      } finally {
+        await bench.wallet.revertTransaction(tx as never).catch(() => undefined);
+      }
+    };
+
+    const singleTransfer = async () => {
+      const ttl = new Date(Date.now() + 30 * 60 * 1000);
+      const tx = await createFeelessTransfer();
+      try {
+        const recipe = await bench.wallet.balanceUnprovenTransaction(
+          tx,
+          { shieldedSecretKeys: bench.shieldedSecretKeys, dustSecretKey: bench.dustSecretKey },
+          { ttl },
+        );
+        return await bench.wallet.finalizeRecipe(recipe);
+      } catch (err) {
+        await external.wallet.revertTransaction(tx).catch(() => undefined);
+        throw err;
+      }
+    };
+
+    const shapes = [
+      await measure('contract call (single tx)', 1, () => prepareSelfTx()),
+      await measure('45 calls merged into one tx', 45, () => prepareMergedCalls(45)),
+      await measure('150 calls merged into one tx', 150, () => prepareMergedCalls(150)),
+      await measure('NIGHT transfer, balanced (single)', 1, singleTransfer),
+    ];
+
+    // Dust generation rate: balance() projects accrual at a given time.
+    const s = benchTrack.latest();
+    const now = Date.now();
+    const genPerHour = s.dust.balance(new Date(now + 3_600_000)) - s.dust.balance(new Date(now));
+    const genPerS = genPerHour / 3600n;
+    const singleFee = BigInt(shapes[0].fee.specks);
+    const perOp150 = BigInt(shapes[2].feePerOp.specks);
+    return {
+      nightHeld: nightBalance(s).toString(),
+      dustBalance: fmt(s.dust.balance(new Date())),
+      dustGenerationPerSecond: fmt(genPerS),
+      shapes,
+      sustainable: {
+        singleTxPerS: singleFee > 0n ? Number((genPerS * 1000n) / singleFee) / 1000 : null,
+        mergedOpsPerS: perOp150 > 0n ? Number((genPerS * 1000n) / perOp150) / 1000 : null,
+      },
+    };
+  };
+
   ready = {
     state,
     providers,
@@ -733,6 +800,7 @@ const init = async (): Promise<void> => {
     mergeBurst,
     mergeCallTest,
     sustained,
+    feeReport,
   };
   log(`API ready on :${PORT} (tx concurrency=${TX_CONCURRENCY})`);
 };
@@ -810,6 +878,10 @@ const server = createServer((req: IncomingMessage, res: ServerResponse) => {
           result: (item as { result?: { status?: string } }).result?.status ?? null,
         })),
       });
+    }
+    if (req.method === 'POST' && url.pathname === '/fees') {
+      if (!ready) return json(res, 503, { ok: false, error: 'not ready' });
+      return json(res, 200, await ready.feeReport());
     }
     if (req.method === 'POST' && url.pathname === '/sustained') {
       if (!ready) return json(res, 503, { ok: false, error: 'not ready' });
