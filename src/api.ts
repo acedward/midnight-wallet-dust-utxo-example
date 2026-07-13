@@ -113,6 +113,7 @@ interface Ready {
   readonly externalInfo: () => WalletSummary;
   readonly sendSelf: (setPhase: SetPhase) => Promise<{ txHash: string }>;
   readonly sendExternal: (setPhase: SetPhase) => Promise<{ txHash: string }>;
+  readonly burst: (n: number) => Promise<object>;
 }
 
 let ready: Ready | null = null;
@@ -307,6 +308,83 @@ const init = async (): Promise<void> => {
     return submitAndFinalize(finalized, setPhase);
   };
 
+  /** Current chain height straight from the node. */
+  const currentHeight = async (): Promise<number> => {
+    const res = await fetch(cfg.node, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ id: 1, jsonrpc: '2.0', method: 'chain_getHeader', params: [] }),
+    });
+    const j = (await res.json()) as { result?: { number?: string } };
+    return parseInt(j.result?.number ?? '0x0', 16);
+  };
+
+  /** Build + prove + balance one increment tx WITHOUT submitting (books one dust coin until submitted+applied). */
+  const prepareSelfTx = async (): Promise<{ identifiers: () => string[] }> => {
+    const unproven = await buildUnprovenIncrementTx(providers, state.contractAddress);
+    const proven = await providers.proofProvider.proveTx(unproven as never);
+    return providers.walletProvider.balanceTx(proven);
+  };
+
+  /**
+   * Burst test: pre-prove N transactions, then fire ALL submissions in the
+   * same instant — isolates block-packing capacity from proving latency.
+   * Requires >= N free dust coins (each prepared tx books one).
+   */
+  const burst = async (n: number) => {
+    const t0 = Date.now();
+    const prepared = await Promise.allSettled(Array.from({ length: n }, () => prepareSelfTx()));
+    const txs = prepared.filter((p) => p.status === 'fulfilled').map((p) => p.value);
+    const prepareErrors = prepared
+      .filter((p) => p.status === 'rejected')
+      .map((p) => String((p as PromiseRejectedResult).reason?.message ?? (p as PromiseRejectedResult).reason))
+      .slice(0, 3);
+    const prepareMs = Date.now() - t0;
+    log(`burst(${n}): prepared ${txs.length}/${n} in ${prepareMs}ms — submitting all at once`);
+
+    const heightBeforeSubmit = await currentHeight();
+    const t1 = Date.now();
+    // Fire-and-forget acks (submitTransaction can hang after broadcast); the
+    // pending-set confirm below is the authoritative signal.
+    const submits = await Promise.allSettled(
+      txs.map((tx) =>
+        Promise.race([
+          bench.wallet.submitTransaction(tx as never),
+          new Promise<never>((_r, rej) => setTimeout(() => rej(new Error('submit-ack-timeout')), 30_000)),
+        ]),
+      ),
+    );
+    const submitMs = Date.now() - t1;
+    const submitAcks = submits.filter((s) => s.status === 'fulfilled').length;
+    const submitErrors = submits
+      .filter((s) => s.status === 'rejected')
+      .map((s) => String((s as PromiseRejectedResult).reason?.message ?? (s as PromiseRejectedResult).reason));
+    const submitErrorSample = [...new Set(submitErrors)].slice(0, 3);
+
+    const t2 = Date.now();
+    const confirms = await Promise.allSettled(
+      txs.map((tx) => waitForFinalization(tx.identifiers(), tx.identifiers()[0] ?? '?')),
+    );
+    const confirmMs = Date.now() - t2;
+    const finalized = confirms.filter((c) => c.status === 'fulfilled').length;
+    const heightAfterConfirm = await currentHeight();
+
+    log(`burst(${n}): finalized ${finalized}/${txs.length} — blocks ${heightBeforeSubmit}..${heightAfterConfirm}`);
+    return {
+      requested: n,
+      prepared: txs.length,
+      submitAcks,
+      finalized,
+      prepareMs,
+      submitMs,
+      confirmMs,
+      heightBeforeSubmit,
+      heightAfterConfirm,
+      prepareErrors,
+      submitErrors: submitErrorSample,
+    };
+  };
+
   ready = {
     state,
     providers,
@@ -316,6 +394,7 @@ const init = async (): Promise<void> => {
     externalInfo: () => summarize(state.externalAddress, externalTrack.latest),
     sendSelf,
     sendExternal,
+    burst,
   };
   log(`API ready on :${PORT} (tx concurrency=${TX_CONCURRENCY})`);
 };
@@ -393,6 +472,15 @@ const server = createServer((req: IncomingMessage, res: ServerResponse) => {
           result: (item as { result?: { status?: string } }).result?.status ?? null,
         })),
       });
+    }
+    if (req.method === 'POST' && url.pathname === '/burst') {
+      if (!ready) return json(res, 503, { ok: false, error: 'not ready' });
+      const n = Number(url.searchParams.get('n') ?? 20);
+      if (!Number.isInteger(n) || n < 1 || n > 500) {
+        return json(res, 400, { ok: false, error: `invalid n "${url.searchParams.get('n')}" — use 1..500` });
+      }
+      const result = await ready.burst(n);
+      return json(res, 200, result);
     }
     if (req.method === 'POST' && url.pathname === '/tx') {
       if (!ready) return json(res, 503, { ok: false, error: 'not ready' });
