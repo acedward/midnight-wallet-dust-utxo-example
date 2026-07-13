@@ -17,6 +17,7 @@
  * builds and proves as many transactions in parallel as allowed; the Counter
  * ledger type is commutative so case-A txs never conflict on contract state.
  */
+import * as ledger from '@midnight-ntwrk/ledger-v8';
 import { unshieldedToken } from '@midnight-ntwrk/ledger-v8';
 import { existsSync, readFileSync } from 'node:fs';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
@@ -386,15 +387,44 @@ const init = async (): Promise<void> => {
     };
   };
 
+  /**
+   * Rebuild an (unsigned) single-intent transaction with its intent at a
+   * RANDOM segment id. The wallet SDK builds every tx at segment 1
+   * (`Transaction.fromParts`), so two wallet-built txs can never be merged
+   * ("key (segment_id) collision during intents merge"). Must run BEFORE
+   * signing — signatures commit to the segment id.
+   */
+  const randomizeSegment = (tx: ledger.UnprovenTransaction): ledger.UnprovenTransaction => {
+    const intent = tx.intents?.get(1);
+    if (!intent) return tx;
+    for (;;) {
+      const rebuilt = ledger.Transaction.fromPartsRandomized(
+        cfg.networkId,
+        undefined,
+        undefined,
+        intent as never,
+      );
+      const seg = [...(rebuilt.intents?.keys() ?? [])][0];
+      // Avoid segment 1: the fee-balancing tx the benchmark wallet merges in
+      // later is wallet-built and always sits at segment 1.
+      if (seg !== undefined && seg !== 1) return rebuilt;
+    }
+  };
+
   /** Create + sign one fee-less transfer from the external wallet (unproven, unbalanced). */
-  const createFeelessTransfer = async () => {
+  const createFeelessTransfer = async (opts: { randomSegment?: boolean } = {}) => {
     const ttl = new Date(Date.now() + 30 * 60 * 1000);
     const recipe = await external.wallet.transferTransaction(
       [{ type: 'unshielded', outputs: [{ type: night, receiverAddress: sinkAddress, amount: externalTransferAmount }] }],
       { shieldedSecretKeys: external.shieldedSecretKeys, dustSecretKey: external.dustSecretKey },
       { ttl, payFees: false },
     );
-    const signed = await external.wallet.signRecipe(recipe, (payload) => external.unshieldedKeystore.signData(payload));
+    if (recipe.type !== 'UNPROVEN_TRANSACTION') throw new Error(`unexpected recipe type: ${recipe.type}`);
+    const tx = opts.randomSegment ? randomizeSegment(recipe.transaction) : recipe.transaction;
+    const signed = await external.wallet.signRecipe(
+      { type: 'UNPROVEN_TRANSACTION', transaction: tx },
+      (payload) => external.unshieldedKeystore.signData(payload),
+    );
     if (signed.type !== 'UNPROVEN_TRANSACTION') throw new Error(`unexpected recipe type: ${signed.type}`);
     return signed.transaction;
   };
@@ -409,74 +439,87 @@ const init = async (): Promise<void> => {
   const mergeBurst = async (total: number, groupSize: number) => {
     const ttl = new Date(Date.now() + 30 * 60 * 1000);
     const t0 = Date.now();
-    const transfers = await Promise.all(Array.from({ length: total }, () => createFeelessTransfer()));
+    const transfers = await Promise.all(
+      Array.from({ length: total }, () => createFeelessTransfer({ randomSegment: groupSize > 1 })),
+    );
     const createMs = Date.now() - t0;
 
-    const t1 = Date.now();
-    const groups: (typeof transfers)[number][] = [];
-    for (let i = 0; i < transfers.length; i += groupSize) {
-      const group = transfers.slice(i, i + groupSize);
-      groups.push(group.reduce((acc, tx) => acc.merge(tx)));
-    }
-    const mergeMs = Date.now() - t1;
-    log(`mergeBurst(${total}/${groupSize}): merged into ${groups.length} txs in ${mergeMs}ms — balancing`);
-
-    const t2 = Date.now();
-    const finalized = await Promise.all(
-      groups.map(async (g) => {
-        const recipe = await bench.wallet.balanceUnprovenTransaction(
-          g,
-          { shieldedSecretKeys: bench.shieldedSecretKeys, dustSecretKey: bench.dustSecretKey },
-          { ttl },
-        );
-        return bench.wallet.finalizeRecipe(recipe);
-      }),
-    );
-    const balanceProveMs = Date.now() - t2;
-
-    const heightBeforeSubmit = await currentHeight();
-    const t3 = Date.now();
-    const submits = await Promise.allSettled(
-      finalized.map((tx) =>
-        Promise.race([
-          bench.wallet.submitTransaction(tx),
-          new Promise<never>((_r, rej) => setTimeout(() => rej(new Error('submit-ack-timeout')), 30_000)),
-        ]),
-      ),
-    );
-    const submitMs = Date.now() - t3;
-    const submitErrors = [
-      ...new Set(
-        submits
-          .filter((s) => s.status === 'rejected')
-          .map((s) => String((s as PromiseRejectedResult).reason?.message ?? (s as PromiseRejectedResult).reason)),
-      ),
-    ].slice(0, 3);
-
-    const t4 = Date.now();
-    const confirms = await Promise.allSettled(
-      finalized.map((tx) => waitForFinalization(tx.identifiers(), tx.identifiers()[0] ?? '?')),
-    );
-    const confirmMs = Date.now() - t4;
-    const finalizedCount = confirms.filter((c) => c.status === 'fulfilled').length;
-    const heightAfterConfirm = await currentHeight();
-    log(`mergeBurst(${total}/${groupSize}): ${finalizedCount}/${groups.length} merged txs finalized`);
-
-    return {
-      total,
-      groupSize,
-      mergedTxs: groups.length,
-      finalizedMergedTxs: finalizedCount,
-      transfersLanded: finalizedCount * groupSize,
-      createMs,
-      mergeMs,
-      balanceProveMs,
-      submitMs,
-      confirmMs,
-      heightBeforeSubmit,
-      heightAfterConfirm,
-      submitErrors,
+    // From here on, any failure must release the external wallet's booked
+    // UTXOs — a failed run otherwise strands them until the API restarts.
+    const revertAll = async () => {
+      await Promise.allSettled(transfers.map((tx) => external.wallet.revertTransaction(tx)));
     };
+    try {
+      const t1 = Date.now();
+      const groups: (typeof transfers)[number][] = [];
+      for (let i = 0; i < transfers.length; i += groupSize) {
+        const group = transfers.slice(i, i + groupSize);
+        groups.push(group.reduce((acc, tx) => acc.merge(tx)));
+      }
+      const mergeMs = Date.now() - t1;
+      log(`mergeBurst(${total}/${groupSize}): merged into ${groups.length} txs in ${mergeMs}ms — balancing`);
+
+      const t2 = Date.now();
+      const finalized = await Promise.all(
+        groups.map(async (g) => {
+          const recipe = await bench.wallet.balanceUnprovenTransaction(
+            g,
+            { shieldedSecretKeys: bench.shieldedSecretKeys, dustSecretKey: bench.dustSecretKey },
+            { ttl },
+          );
+          return bench.wallet.finalizeRecipe(recipe);
+        }),
+      );
+      const balanceProveMs = Date.now() - t2;
+
+      const heightBeforeSubmit = await currentHeight();
+      const t3 = Date.now();
+      const submits = await Promise.allSettled(
+        finalized.map((tx) =>
+          Promise.race([
+            bench.wallet.submitTransaction(tx),
+            new Promise<never>((_r, rej) => setTimeout(() => rej(new Error('submit-ack-timeout')), 30_000)),
+          ]),
+        ),
+      );
+      const submitMs = Date.now() - t3;
+      const submitErrors = [
+        ...new Set(
+          submits
+            .filter((s) => s.status === 'rejected')
+            .map((s) => String((s as PromiseRejectedResult).reason?.message ?? (s as PromiseRejectedResult).reason)),
+        ),
+      ].slice(0, 3);
+
+      const t4 = Date.now();
+      const confirms = await Promise.allSettled(
+        finalized.map((tx) => waitForFinalization(tx.identifiers(), tx.identifiers()[0] ?? '?')),
+      );
+      const confirmMs = Date.now() - t4;
+      const finalizedCount = confirms.filter((c) => c.status === 'fulfilled').length;
+      const heightAfterConfirm = await currentHeight();
+      log(`mergeBurst(${total}/${groupSize}): ${finalizedCount}/${groups.length} merged txs finalized`);
+
+      return {
+        total,
+        groupSize,
+        mergedTxs: groups.length,
+        finalizedMergedTxs: finalizedCount,
+        transfersLanded: finalizedCount * groupSize,
+        createMs,
+        mergeMs,
+        balanceProveMs,
+        submitMs,
+        confirmMs,
+        heightBeforeSubmit,
+        heightAfterConfirm,
+        submitErrors,
+      };
+    } catch (err) {
+      log(`mergeBurst(${total}/${groupSize}) failed — reverting ${transfers.length} booked transfers`);
+      await revertAll();
+      throw err;
+    }
   };
 
   ready = {
