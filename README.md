@@ -13,17 +13,23 @@ table** so results are directly comparable.
 All rows: 6s blocks · node 1.0.0 · 12 Docker CPUs · 3 proof servers. "ops" are logical
 operations (contract calls or transfers); "landed" is chain-verified.
 
+"wall" = elapsed seconds of the measured phase: submit → all finalized for burst/merge
+rows (proving happens before the clock); full pipeline (build+prove+…+finalized) for
+waves and merged-calls rows. Top-tier configs use **full-block multiples** (45 unmerged
+txs/block, 40 merged-×8 transfers/block) so the peak rows show clean per-block packing.
+
 | experiment | config | ops requested | ops landed | wall (s) | blocks | max ops/block | ops/s |
 |---|---|---:|---:|---:|---:|---:|---:|
 | waves (self) | 20 concurrent, no merge | 20 | 20 | 24.0 | — | — | 0.83 |
 | waves (self) | 100 concurrent, no merge | 100 | 100 | 72.5 | — | — | 1.38 |
 | waves (self) | 200 concurrent, no merge | 200 | 200 | 125.1 | — | — | 1.60 |
-| burst (pre-proven) | 40 txs at once, no merge | 40 | 40 | 30 | 1 | 40 | 1.33 |
-| burst (pre-proven) | 100 txs at once, no merge | 100 | 100 | 33 | 3 | **45** | 3.03 |
-| merged transfers | 90 transfers, no merge (baseline) | 90 | 90 | 21 | 4 | 23 | 4.29 |
-| merged transfers | 90 transfers, merged ×8 | 90 | 90 | 14 | 2–3 | **40** | 6.43 |
-| merged contract calls | 45 calls in ONE tx | 45 | 45 | ~19 | 1 | 45 | 2.4 |
-| merged contract calls | **150 calls in ONE tx** | 150 | 150 | ~20 | 1 | **150** | **7.5** |
+| burst (pre-proven) | 90 txs at once (2×45), no merge | 90 | 90 | 23.9 | 2 | **45** | **3.77** |
+| merged transfers | 80 transfers, no merge (baseline) | 80 | 80 | 37.7 | 4 | 23 | 2.12 |
+| merged transfers | 80 transfers, merged ×8 (2×40) | 80 | 80 | 21.7 | 2 | **40** | **3.69** |
+| merged contract calls | **150 calls in ONE tx** | 150 | 150 | 23.0 | 1 | **150** | **6.51** |
+
+(Chain-side the burst's `45+45` spans two 6s blocks — 7.5 tx/s of pure block capacity;
+the wall column additionally includes the wallet observing finalization via the indexer.)
 
 Headline findings:
 

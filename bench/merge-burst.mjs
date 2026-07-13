@@ -43,14 +43,14 @@ const main = async () => {
       config: group === 1 ? `${TOTAL} transfers, no merge (baseline)` : `${TOTAL} transfers, merged ×${group}`,
       requested: TOTAL,
       landed: r.transfersLanded,
-      wallS: (r.submitMs + r.confirmMs) / 1000,
+      wallS: r.submitToFinalizedMs / 1000,
       blocks: blocks.length,
       // ops = logical transfers: extrinsics per block × group size
       maxOpsPerBlock: Math.max(0, ...blocks.map((b) => b.userTxs)) * group,
     };
     console.log(canonicalRow(row));
     rows.push(row);
-    await sleep(15_000); // let external change + dust coins recycle
+    await sleep(30_000); // let external change + dust coins recycle
   }
   console.log(['', ...CANONICAL_HEADER, ...rows.map(canonicalRow)].join('\n'));
   writeResults('merge', 'Merged transfers vs unmerged baseline (Transaction.merge)', rows);

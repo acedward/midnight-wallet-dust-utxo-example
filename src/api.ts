@@ -347,9 +347,10 @@ const init = async (): Promise<void> => {
 
     const heightBeforeSubmit = await currentHeight();
     const t1 = Date.now();
-    // Fire-and-forget acks (submitTransaction can hang after broadcast); the
-    // pending-set confirm below is the authoritative signal.
-    const submits = await Promise.allSettled(
+    // Submission acks can hang even after successful broadcast, so DON'T gate
+    // the clock on them: fire all submissions and watch the pending-set for
+    // finalization CONCURRENTLY. Wall = submit-start → all finalized.
+    const submitsPromise = Promise.allSettled(
       txs.map((tx) =>
         Promise.race([
           bench.wallet.submitTransaction(tx as never),
@@ -357,30 +358,30 @@ const init = async (): Promise<void> => {
         ]),
       ),
     );
-    const submitMs = Date.now() - t1;
-    const submitAcks = submits.filter((s) => s.status === 'fulfilled').length;
-    const submitErrors = submits
-      .filter((s) => s.status === 'rejected')
-      .map((s) => String((s as PromiseRejectedResult).reason?.message ?? (s as PromiseRejectedResult).reason));
-    const submitErrorSample = [...new Set(submitErrors)].slice(0, 3);
-
-    const t2 = Date.now();
     const confirms = await Promise.allSettled(
       txs.map((tx) => waitForFinalization(tx.identifiers(), tx.identifiers()[0] ?? '?')),
     );
-    const confirmMs = Date.now() - t2;
+    const submitToFinalizedMs = Date.now() - t1;
     const finalized = confirms.filter((c) => c.status === 'fulfilled').length;
     const heightAfterConfirm = await currentHeight();
+    const submits = await submitsPromise;
+    const submitAcks = submits.filter((s) => s.status === 'fulfilled').length;
+    const submitErrorSample = [
+      ...new Set(
+        submits
+          .filter((s) => s.status === 'rejected')
+          .map((s) => String((s as PromiseRejectedResult).reason?.message ?? (s as PromiseRejectedResult).reason)),
+      ),
+    ].slice(0, 3);
 
-    log(`burst(${n}): finalized ${finalized}/${txs.length} — blocks ${heightBeforeSubmit}..${heightAfterConfirm}`);
+    log(`burst(${n}): finalized ${finalized}/${txs.length} in ${submitToFinalizedMs}ms — blocks ${heightBeforeSubmit}..${heightAfterConfirm}`);
     return {
       requested: n,
       prepared: txs.length,
       submitAcks,
       finalized,
       prepareMs,
-      submitMs,
-      confirmMs,
+      submitToFinalizedMs,
       heightBeforeSubmit,
       heightAfterConfirm,
       prepareErrors,
@@ -483,56 +484,54 @@ const init = async (): Promise<void> => {
 
       const heightBeforeSubmit = await currentHeight();
       const t3 = Date.now();
-      const submits = await Promise.allSettled(
-        finalized.map((tx) =>
-          Promise.race([
+      // Per group: fire the submission and watch the pending-set for
+      // finalization CONCURRENTLY (acks can hang after successful broadcast,
+      // so the clock must not gate on them). A HARD submission rejection
+      // (anything but ack-timeout) fails that group fast so its booked inputs
+      // can be reverted; ack-timeouts keep waiting — the tx usually lands.
+      const outcomes = await Promise.all(
+        finalized.map(async (tx, i): Promise<{ i: number; outcome: string }> => {
+          const ids = tx.identifiers();
+          let hardError: string | null = null;
+          const submitP: Promise<string | null> = Promise.race([
             bench.wallet.submitTransaction(tx),
             new Promise<never>((_r, rej) => setTimeout(() => rej(new Error('submit-ack-timeout')), 30_000)),
-          ]),
-        ),
+          ]).then(
+            () => null,
+            (e: unknown) => {
+              const msg = String(e instanceof Error ? e.message : e);
+              if (!msg.includes('submit-ack-timeout')) hardError = msg;
+              return msg;
+            },
+          );
+          const rejection: Promise<string> = submitP.then((msg) =>
+            hardError ? `rejected: ${msg}` : new Promise<never>(() => {}),
+          );
+          const outcome = await Promise.race([
+            waitForFinalization(ids, ids[0] ?? '?').then(
+              () => 'finalized',
+              (e: unknown) => `finalize-error: ${String(e instanceof Error ? e.message : e)}`,
+            ),
+            rejection,
+          ]);
+          return { i, outcome };
+        }),
       );
-      const submitMs = Date.now() - t3;
-      const submitErrors = [
-        ...new Set(
-          submits
-            .filter((s) => s.status === 'rejected')
-            .map((s) => String((s as PromiseRejectedResult).reason?.message ?? (s as PromiseRejectedResult).reason)),
-        ),
-      ].slice(0, 3);
-
-      // Only groups whose submission was ACCEPTED (ack or ack-timeout — the
-      // latter can still land) get a finalization wait; hard rejections are
-      // counted as failed and their booked inputs reverted immediately, so a
-      // failed config can't strand UTXOs for the next one.
-      const rejected = submits
-        .map((s, i) => ({ s, i }))
-        .filter(
-          ({ s }) =>
-            s.status === 'rejected' &&
-            !String((s as { s: PromiseRejectedResult }['s']).reason?.message ?? '').includes('submit-ack-timeout'),
-        )
-        .map(({ i }) => i);
-      if (rejected.length > 0) {
-        const rejectedTransfers = rejected.flatMap((i) => transfers.slice(i * groupSize, (i + 1) * groupSize));
+      const submitToFinalizedMs = Date.now() - t3;
+      const failed = outcomes.filter((o) => o.outcome !== 'finalized');
+      if (failed.length > 0) {
+        // Release the booked inputs of failed groups so the next config isn't starved.
+        const failedTransfers = failed.flatMap((f) => transfers.slice(f.i * groupSize, (f.i + 1) * groupSize));
         await Promise.allSettled([
-          ...rejectedTransfers.map((tx) => external.wallet.revertTransaction(tx)),
-          ...rejected.map((i) => bench.wallet.revertTransaction(finalized[i] as never)),
+          ...failedTransfers.map((tx) => external.wallet.revertTransaction(tx)),
+          ...failed.map((f) => bench.wallet.revertTransaction(finalized[f.i] as never)),
         ]);
-        log(`mergeBurst(${total}/${groupSize}): ${rejected.length} merged txs REJECTED at submission — inputs reverted`);
+        log(`mergeBurst(${total}/${groupSize}): ${failed.length} merged txs failed — inputs reverted`);
       }
-      const rejectedSet = new Set(rejected);
-      const t4 = Date.now();
-      const confirms = await Promise.allSettled(
-        finalized.map((tx, i) =>
-          rejectedSet.has(i)
-            ? Promise.reject(new Error('rejected at submission'))
-            : waitForFinalization(tx.identifiers(), tx.identifiers()[0] ?? '?'),
-        ),
-      );
-      const confirmMs = Date.now() - t4;
-      const finalizedCount = confirms.filter((c) => c.status === 'fulfilled').length;
+      const submitErrors = [...new Set(failed.map((f) => f.outcome))].slice(0, 3);
+      const finalizedCount = outcomes.length - failed.length;
       const heightAfterConfirm = await currentHeight();
-      log(`mergeBurst(${total}/${groupSize}): ${finalizedCount}/${groups.length} merged txs finalized`);
+      log(`mergeBurst(${total}/${groupSize}): ${finalizedCount}/${groups.length} merged txs finalized in ${submitToFinalizedMs}ms`);
 
       return {
         total,
@@ -543,8 +542,7 @@ const init = async (): Promise<void> => {
         createMs,
         mergeMs,
         balanceProveMs,
-        submitMs,
-        confirmMs,
+        submitToFinalizedMs,
         heightBeforeSubmit,
         heightAfterConfirm,
         submitErrors,

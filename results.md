@@ -130,3 +130,45 @@ Revised throughput picture: batching via merge lifts the per-block ceiling for t
 contract calls from 45 to ~150+ ops (≈25 ops/s at 6s blocks), with proving cost per op
 collapsing (one balancing + shared envelope). The TS `@throws` doc for `merge` should be
 reported upstream as stale.
+
+## Pre-proven burst (no merging)
+
+Run: 2026-07-13T19:35:49.077Z
+
+| experiment | config | ops requested | ops landed | wall (s) | blocks | max ops/block | ops/s |
+|---|---|---:|---:|---:|---:|---:|---:|
+| burst (pre-proven) | 90 txs submitted at once, no merge | 90 | 90 | 30.0 | 2 | 45 | 3.00 |
+
+## Merged transfers vs unmerged baseline (Transaction.merge)
+
+Run: 2026-07-13T19:37:31.258Z
+
+| experiment | config | ops requested | ops landed | wall (s) | blocks | max ops/block | ops/s |
+|---|---|---:|---:|---:|---:|---:|---:|
+| merged transfers | 80 transfers, no merge (baseline) | 80 | 46 | 30.0 | 5 | 23 | 1.53 |
+| merged transfers | 80 transfers, merged ×8 | 80 | 80 | 30.0 | 2 | 40 | 2.67 |
+
+## Pre-proven burst (no merging)
+
+Run: 2026-07-13T19:42:44.834Z
+
+| experiment | config | ops requested | ops landed | wall (s) | blocks | max ops/block | ops/s |
+|---|---|---:|---:|---:|---:|---:|---:|
+| burst (pre-proven) | 90 txs submitted at once, no merge | 90 | 90 | 23.9 | 2 | 45 | 3.77 |
+
+## Merged transfers vs unmerged baseline (Transaction.merge)
+
+Run: 2026-07-13T19:45:26.198Z
+
+| experiment | config | ops requested | ops landed | wall (s) | blocks | max ops/block | ops/s |
+|---|---|---:|---:|---:|---:|---:|---:|
+| merged transfers | 80 transfers, no merge (baseline) | 80 | 80 | 37.7 | 4 | 23 | 2.12 |
+| merged transfers | 80 transfers, merged ×8 | 80 | 80 | 21.7 | 2 | 40 | 3.69 |
+
+## Merged contract calls (N calls in one transaction)
+
+Run: 2026-07-13T19:46:17.416Z
+
+| experiment | config | ops requested | ops landed | wall (s) | blocks | max ops/block | ops/s |
+|---|---|---:|---:|---:|---:|---:|---:|
+| merged contract calls | 150 calls in ONE tx | 150 | 150 | 23.0 | 1 | 150 | 6.51 |

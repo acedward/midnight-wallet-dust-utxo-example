@@ -31,13 +31,13 @@ const main = async () => {
       config: `${n} txs submitted at once, no merge`,
       requested: n,
       landed: r.finalized,
-      wallS: (r.submitMs + r.confirmMs) / 1000,
+      wallS: r.submitToFinalizedMs / 1000,
       blocks: blocks.length,
       maxOpsPerBlock: Math.max(0, ...blocks.map((b) => b.userTxs)),
     };
     console.log(canonicalRow(row));
     rows.push(row);
-    await sleep(10_000); // drain between bursts
+    await sleep(30_000); // drain: let dust coins recycle after big bursts
   }
   console.log(['', ...CANONICAL_HEADER, ...rows.map(canonicalRow)].join('\n'));
   writeResults('burst', 'Pre-proven burst (no merging)', rows);
