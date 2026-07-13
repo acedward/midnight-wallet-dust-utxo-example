@@ -1,6 +1,6 @@
 # fast-tx benchmark results
 
-Run: 2026-07-10T23:24:48.432Z  ·  API: http://127.0.0.1:3300  ·  waves: 1, 5, 20, 50, 100
+Run: 2026-07-13T17:42:07.953Z  ·  API: http://127.0.0.1:3300  ·  waves: 20, 50, 100, 200
 
 ## mode: self
 
@@ -9,51 +9,34 @@ build → prove (proof server) → balance fees (dust) → submit → finalized 
 
 | requests | ok | failed | wall time (s) | avg latency (s) | p50 (s) | max (s) | throughput (tx/s) | counter after |
 |---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| 1 | 1 | 0 | 21.5 | 21.5 | 21.5 | 21.5 | 0.05 | 1 |
-| 5 | 5 | 0 | 17.4 | 17.4 | 17.4 | 17.4 | 0.29 | 6 |
-| 20 | 20 | 0 | 35.5 | 24.8 | 24.1 | 35.5 | 0.56 | 26 |
-| 50 | 50 | 0 | 72.5 | 42.7 | 43.1 | 72.5 | 0.69 | 76 |
-| 100 | 100 | 0 | 125.6 | 70.9 | 71.8 | 125.6 | 0.80 | 176 |
+| 20 | 20 | 0 | 24.0 | 20.2 | 17.7 | 24.0 | 0.83 | 20 |
+| 50 | 50 | 0 | 35.7 | 25.9 | 23.7 | 35.7 | 1.40 | 70 |
+| 100 | 100 | 0 | 72.5 | 39.2 | 36.6 | 72.5 | 1.38 | 170 |
+| 200 | 200 | 0 | 125.1 | 67.5 | 70.6 | 125.1 | 1.60 | 370 |
 
-## mode: external
+## Scaling run: hunting the node's limit
 
-An EXTERNAL wallet creates a NIGHT transfer with `{ payFees: false }`; the benchmark wallet
-only balances the missing dust/gas, finalizes, submits, and waits for on-chain inclusion.
+Config: Docker VM 2→12 CPUs · 3 proof servers behind nginx `least_conn` · 32 pipeline
+lanes · 33 dust coins · 6e12 NIGHT/UTXO. Self mode, fresh chain:
 
-| requests | ok | failed | wall time (s) | avg latency (s) | p50 (s) | max (s) | throughput (tx/s) | counter after |
-|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| 1 | 1 | 0 | 19.2 | 19.2 | 19.2 | 19.2 | 0.05 | 176 |
-| 5 | 5 | 0 | 17.4 | 16.6 | 16.4 | 17.4 | 0.29 | 176 |
-| 20 | 20 | 0 | 35.3 | 24.2 | 23.0 | 35.3 | 0.57 | 176 |
-| 50 | 50 | 0 | 72.1 | 42.8 | 43.4 | 72.1 | 0.69 | 176 |
-| 100 | 100 | 0 | 1960.6 | 956.3 | 995.9 | 1960.6 | 0.05 | 176 |
+| requests | ok | wall (s) | avg (s) | p50 (s) | throughput (tx/s) |
+|---:|---:|---:|---:|---:|---:|
+| 20 | 20 | 24.0 | 20.2 | 17.7 | 0.83 |
+| 50 | 50 | 35.7 | 25.9 | 23.7 | 1.40 |
+| 100 | 100 | 72.5 | 39.2 | 36.6 | 1.38 |
+| 200 | 200 | 125.1 | 67.5 | 70.6 | **1.60** |
 
-## Appendix: how the two modes converged
+Per-block extrinsic counts over the run (idle block = 3 inherents; "ours" = count − 3):
+peak block carried **24 benchmark txs**; the steady wave-200 pattern is a repeating
+`[21, 17, 3]` cycle — ~32 txs land across two blocks, then an **empty block** while all
+32 lanes are busy proving the next batch (~18s pipeline ≈ 3 block times).
 
-External mode originally had the benchmark wallet prove the ENTIRE unproven external tx
-(`balanceUnprovenTransaction` on an unproven transfer) — that skewed it heavily. With the
-intended split — the **creator proves** its fee-less tx (`payFees: false` →
-`finalizeRecipe` on the external side), and the benchmark wallet only
-**`balanceFinalizedTransaction`** (one small dust-spend proof) + submit — the modes are
-symmetric, exactly as expected:
+**Conclusion: the node's limit was NOT reached.** It absorbed 24 single-wallet txs in
+one 6s block with zero rejects and then idled, waiting for the client. The binding
+constraint is still ZK proving throughput on this machine (12 vCPUs shared by node +
+indexer + 3 provers + wallet). Node ceiling ≥ 4 tx/s from one wallet; to find the real
+one, proving must move to separate hardware (N proof-server machines), then raise
+TX_CONCURRENCY/dust coins in step.
 
-| wave | self | external (creator-proves) |
-|---:|---:|---:|
-| 5 | 17.4s | 17.4s |
-| 20 | 35.5s | 35.3s |
-| 50 | 72.5s | 72.1s |
-| 100 | 125.6s | 1960.6s* |
-
-\* external wave 100 ran LAST (252 fees already paid this session): the wallet's
-accumulated dust buffer was drained, so the wave proceeded at the **dust generation
-rate** (∝ NIGHT held, 65.6e12 atoms here) — 100/100 still succeeded, just fee-budget
-limited. Burst capacity = accrued dust + ~21 dust coins; sustained capacity = dust
-generation rate.
-
-Other findings that hold:
-- The external wallet's UTXO pool size is irrelevant to this flow's throughput
-  (20 vs 100 identical) — a fee-less transfer proof is nearly free (no circuits, no dust
-  spend), so the creator side is never the bottleneck.
-- Keep benchmark/balancer wallets clean: routing transfer outputs TO the balancer
-  litters it with micro NIGHT UTXOs whose near-worthless auto-generated dust coins
-  degrade coin selection ("could not balance dust"). Use a sink address.
+Dust after 370 txs: balance still growing (4.0e20) — at 6e12-NIGHT UTXOs the fee budget
+sustains this rate indefinitely; dust was not a limiter in this run.
