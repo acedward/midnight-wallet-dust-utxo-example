@@ -65,6 +65,17 @@ node bench/bench.mjs --waves 1,5 --modes self   # subset
 The bench prints (and writes to `results.md`) a markdown table per mode:
 requests · ok/failed · wall time · avg/p50/max latency · throughput (tx/s).
 
+### All experiments (with and without merging)
+
+| experiment | script | API endpoint | measures |
+|---|---|---|---|
+| concurrent waves (no merge) | `bench/bench.mjs` | `POST /tx?mode=self\|external` | end-to-end tx/s per wave, both test cases |
+| pre-proven burst (no merge) | `bench/burst.mjs` | `POST /burst?n=N` | node block-packing: N proven txs submitted at once (cap found: 45/block) |
+| merged transfers vs baseline | `bench/merge-burst.mjs --groups 1,5,8` | `POST /merge-burst?total=T&group=G` | `group=1` = no merge baseline; `group>1` = Transaction.merge (23 → 40 transfers/block at group 8) |
+| merged contract calls | `bench/merge-calls.mjs` | `POST /merge-call-test?n=N` | N `incrementBy` calls in ONE tx, counter-delta verified (150 ok; 200 exceeds cost cap) |
+
+Findings from all runs are consolidated in [results.md](results.md).
+
 ### API
 
 | endpoint | description |
