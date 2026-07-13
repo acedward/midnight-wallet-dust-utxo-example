@@ -96,6 +96,8 @@ node bench/bench.mjs          # 1. concurrent waves, no merging (self + external
 node bench/burst.mjs          # 2. pre-proven burst → node's per-block packing cap
 node bench/merge-burst.mjs    # 3. merged transfers vs group=1 unmerged baseline
 node bench/merge-calls.mjs    # 4. N contract calls merged into ONE transaction
+node bench/sustained.mjs      # 5. continuous multi-block streams (round trip amortized)
+curl -X POST localhost:3300/fees   # exact dust cost per tx shape (prepared + reverted)
 ```
 
 Every script prints per-run detail plus the canonical table, writes
