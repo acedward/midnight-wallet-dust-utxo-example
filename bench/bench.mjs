@@ -18,6 +18,7 @@ import {
   arg,
   canonicalRow,
   CANONICAL_HEADER,
+  chainSpanS,
   currentHeight,
   scanBlocks,
   sleep,
@@ -62,6 +63,7 @@ const runWave = async (mode, n) => {
     wallS: wallMs / 1000,
     blocks: blocks.length,
     maxOpsPerBlock: Math.max(0, ...blocks.map((b) => b.userTxs)),
+      chainS: chainSpanS(blocks),
   };
   console.log(canonicalRow(row));
   return row;

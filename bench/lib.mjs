@@ -69,20 +69,33 @@ export const waitForApiReady = async () => {
   console.log(' API ready & idle.');
 };
 
+export const BLOCK_TIME_S = 6;
+
 export const CANONICAL_HEADER = [
-  '| experiment | config | ops requested | ops landed | wall (s) | blocks | max ops/block | ops/s |',
-  '|---|---|---:|---:|---:|---:|---:|---:|',
+  '| experiment | config | ops requested | ops landed | wall (s) | blocks | max ops/block | ops/s (wall) | ops/s (chain) |',
+  '|---|---|---:|---:|---:|---:|---:|---:|---:|',
 ];
+
+/** Chain-side seconds actually spanned by the busy blocks (first→last, inclusive). */
+export const chainSpanS = (blocks) =>
+  blocks.length > 0 ? (blocks[blocks.length - 1].height - blocks[0].height + 1) * BLOCK_TIME_S : 0;
 
 /**
  * @param r {{experiment: string, config: string, requested: number, landed: number,
- *            wallS: number, blocks?: number|string, maxOpsPerBlock?: number|string}}
+ *            wallS: number, blocks?: number|string, maxOpsPerBlock?: number|string,
+ *            chainS?: number}}
+ *
+ * ops/s (wall)  = landed / wall — what the submitting client experiences,
+ *                 including proving handoff and finalization OBSERVATION lag.
+ * ops/s (chain) = landed / (busy block span × 6s) — what the chain actually
+ *                 sustained while carrying the work.
  */
 export const canonicalRow = (r) => {
   const opsPerS = r.wallS > 0 ? (r.landed / r.wallS).toFixed(2) : '—';
+  const chainOpsPerS = r.chainS && r.chainS > 0 ? (r.landed / r.chainS).toFixed(2) : '—';
   return (
     `| ${r.experiment} | ${r.config} | ${r.requested} | ${r.landed} | ${r.wallS.toFixed(1)} | ` +
-    `${r.blocks ?? '—'} | ${r.maxOpsPerBlock ?? '—'} | ${opsPerS} |`
+    `${r.blocks ?? '—'} | ${r.maxOpsPerBlock ?? '—'} | ${opsPerS} | ${chainOpsPerS} |`
   );
 };
 

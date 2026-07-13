@@ -8,7 +8,7 @@
  *
  *   node bench/merge-calls.mjs [--api URL] [--node URL] [--sizes 2,20,45,90,150,200]
  */
-import { API, arg, canonicalRow, CANONICAL_HEADER, scanBlocks, sleep, waitForApiReady, writeResults } from './lib.mjs';
+import { API, arg, canonicalRow, CANONICAL_HEADER, chainSpanS, scanBlocks, sleep, waitForApiReady, writeResults } from './lib.mjs';
 
 const SIZES = arg('sizes', '2,20,45,90,150,200').split(',').map(Number);
 
@@ -45,6 +45,7 @@ const main = async () => {
       blocks: blocks.length,
       // the merged tx is one extrinsic carrying n ops; it lands in one block
       maxOpsPerBlock: blocks.length > 0 ? n : 0,
+      chainS: chainSpanS(blocks),
     };
     console.log(canonicalRow(row));
     rows.push(row);

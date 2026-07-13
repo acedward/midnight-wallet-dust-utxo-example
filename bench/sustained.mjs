@@ -8,7 +8,7 @@
  *   node bench/sustained.mjs [--api URL] [--node URL] \
  *     [--singleTotal 270] [--concurrency 64] [--mergedTotal 1200] [--group 150]
  */
-import { API, arg, canonicalRow, CANONICAL_HEADER, scanBlocks, sleep, waitForApiReady, writeResults } from './lib.mjs';
+import { API, arg, canonicalRow, CANONICAL_HEADER, chainSpanS, scanBlocks, sleep, waitForApiReady, writeResults } from './lib.mjs';
 
 const SINGLE_TOTAL = Number(arg('singleTotal', 270));
 const CONCURRENCY = Number(arg('concurrency', 64));
@@ -38,6 +38,7 @@ const run = async (mode, params, configLabel) => {
     wallS: r.firstSubmitToLastFinalMs / 1000,
     blocks: blocks.length,
     maxOpsPerBlock: Math.max(0, ...opsPerBlock),
+      chainS: chainSpanS(blocks),
   };
   console.log(canonicalRow(row));
   return row;

@@ -18,24 +18,32 @@ rows (proving happens before the clock); full pipeline (build+prove+…+finalize
 waves and merged-calls rows. Top-tier configs use **full-block multiples** (45 unmerged
 txs/block, 40 merged-×8 transfers/block) so the peak rows show clean per-block packing.
 
-The last column names the ceiling each row is pressing against. Three limits exist in
-this system: **proving** — client-side ZK proof throughput (CPU); **block weight** —
-the chain packs ~45 unmerged txs / ~5 merged-×8 txs / 1 merged-×150 tx per 6s block
-(node logs `HitBlockWeightLimit`); **round trip** — ~2 blocks of fixed overhead
-(proving handoff + finalization observation) that dominates short runs and amortizes
-away in sustained streams.
+Two throughput columns: **ops/s (wall)** = what the submitting client experiences
+(includes proving handoff and finalization *observation* lag, which grows with tx
+count); **ops/s (chain)** = ops ÷ (busy-block span × 6s) — what the chain actually
+sustained. The last column names the ceiling each row presses against. Three limits
+exist: **proving** — client ZK proof throughput (CPU); **block weight** — the chain
+packs ~45 unmerged txs / ~5 merged-×8 transfers / 1 merged-×150 tx per 6s block (node
+logs `HitBlockWeightLimit`); **observation** — client-side lag watching finalizations,
+visible as the wall column trailing the chain column.
 
-| experiment | config | ops requested | ops landed | wall (s) | blocks | max ops/block | ops/s | limiting factor (theoretical) |
-|---|---|---:|---:|---:|---:|---:|---:|---|
-| waves (self) | 20 concurrent, no merge | 20 | 20 | 24.0 | — | — | 0.83 | round trip: 20 ÷ ~20s latency ≈ 1.0 |
-| waves (self) | 100 concurrent, no merge | 100 | 100 | 72.5 | — | — | 1.38 | proving: 32 lanes ÷ ~23s ≈ 1.4 |
-| waves (self) | 200 concurrent, no merge | 200 | 200 | 125.1 | — | — | 1.60 | proving: ~1.7 proofs/s on this machine |
-| burst (pre-proven) | 90 txs at once (2×45), no merge | 90 | 90 | 23.9 | 2 | **45** | **3.77** | block weight: 45/block ⇒ 7.5; round trip halves it on 2 blocks |
-| merged transfers | 80 transfers, no merge (baseline) | 80 | 80 | 37.7 | 4 | 23 | 2.12 | block weight: 23/block ⇒ 3.8 |
-| merged transfers | 80 transfers, merged ×8 (2×40) | 80 | 80 | 21.7 | 2 | **40** | **3.69** | block weight: 40/block ⇒ 6.7 |
-| merged contract calls | **150 calls in ONE tx** | 150 | 150 | 23.0 | 1 | **150** | **6.51** | round trip: 1 block of work, ~3 blocks of wall |
-| sustained (single) | 180 txs pipelined, 32 lanes | 180 | 180 | 108.4 | 11 | 30 | 1.66 | **proving: ~1.7 proofs/s — at the ceiling** |
-| sustained (merged) | **1200 calls, merged ×150 continuous** | 1200 | 1200 | 66.7 | 8 | **150** | **17.98** | **block weight: 150/block ⇒ 25 ops/s — at the ceiling** |
+| experiment | config | ops | landed | wall (s) | blocks | max ops/block | ops/s (wall) | ops/s (chain) | limiting factor (theoretical) |
+|---|---|---:|---:|---:|---:|---:|---:|---:|---|
+| waves (self) | 20 concurrent, no merge | 20 | 20 | 24.0 | — | — | 0.83 | — | pipeline latency: 20 ÷ ~20s ≈ 1.0 |
+| waves (self) | 200 concurrent, no merge | 200 | 200 | 125.1 | — | — | 1.60 | — | proving: ~1.7 proofs/s on this machine |
+| burst (pre-proven) | 90 txs at once (2×45) | 90 | 90 | 24.8 | 2 | **45** | 3.63 | **7.50** | **block weight: 45/block — chain at ceiling** |
+| burst (pre-proven) | 225 txs at once (5×45) | 225 | 225 | 63.5 | 5 | **45** | 3.54 | **7.50** | **block weight — 5 consecutive full blocks** |
+| merged transfers | 80 transfers, no merge (baseline) | 80 | 80 | 37.7 | 4 | 23 | 2.12 | 3.33 | block weight: 23/block ⇒ 3.8 |
+| merged transfers | 80 transfers, merged ×8 (2×40) | 80 | 80 | 21.7 | 2 | **40** | 3.69 | 6.67 | block weight: 40/block ⇒ 6.7 |
+| merged contract calls | **150 calls in ONE tx** | 150 | 150 | 23.0 | 1 | **150** | 6.51 | 25.00 | one block of work; wall pays the round trip |
+| sustained (single) | 180 txs pipelined, 32 lanes | 180 | 180 | 109.7 | 16 | 30 | 1.64 | 1.76 | **proving: ~1.7 proofs/s — at the ceiling** |
+| sustained (merged) | **1200 calls, merged ×150 continuous** | 1200 | 1200 | 63.2 | 8 | **150** | **18.99** | **25.00** | **block weight: 150/block ⇒ 25 — at the ceiling** |
+
+Note how the chain column exposes what the wall column hides: pre-proven bursts of ANY
+size run the chain at exactly **7.50 tx/s** (the 225-burst filled 5 consecutive blocks,
+45+45+45+45+45) — the wall figure trails only because the wallet takes extra seconds to
+*observe* the finalizations. Unmerged sustained throughput is proving-bound (~1.7); the
+merged stream holds the chain at its true 25 ops/s ceiling indefinitely.
 
 (Chain-side the burst's `45+45` spans two 6s blocks — 7.5 tx/s of pure block capacity;
 the wall column additionally includes the wallet observing finalization via the indexer.)

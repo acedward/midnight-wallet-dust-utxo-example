@@ -9,7 +9,7 @@
  *
  *   node bench/merge-burst.mjs [--api URL] [--node URL] [--total 90] [--groups 1,5,8]
  */
-import { API, arg, canonicalRow, CANONICAL_HEADER, scanBlocks, sleep, waitForApiReady, writeResults } from './lib.mjs';
+import { API, arg, canonicalRow, CANONICAL_HEADER, chainSpanS, scanBlocks, sleep, waitForApiReady, writeResults } from './lib.mjs';
 
 const TOTAL = Number(arg('total', 90));
 const GROUPS = arg('groups', '1,5,8').split(',').map(Number);
@@ -47,6 +47,7 @@ const main = async () => {
       blocks: blocks.length,
       // ops = logical transfers: extrinsics per block × group size
       maxOpsPerBlock: Math.max(0, ...blocks.map((b) => b.userTxs)) * group,
+      chainS: chainSpanS(blocks),
     };
     console.log(canonicalRow(row));
     rows.push(row);

@@ -189,3 +189,45 @@ Run: 2026-07-13T20:05:57.031Z
 | experiment | config | ops requested | ops landed | wall (s) | blocks | max ops/block | ops/s |
 |---|---|---:|---:|---:|---:|---:|---:|
 | sustained (single) | 180 txs pipelined, 32 lanes, no merge | 180 | 180 | 108.4 | 11 | 30 | 1.66 |
+
+## Pre-proven burst (no merging)
+
+Run: 2026-07-13T20:36:24.795Z
+
+| experiment | config | ops requested | ops landed | wall (s) | blocks | max ops/block | ops/s |
+|---|---|---:|---:|---:|---:|---:|---:|
+| burst (pre-proven) | 90 txs submitted at once, no merge | 90 | 90 | 27.4 | 2 | 45 | 3.29 |
+| burst (pre-proven) | 225 txs submitted at once, no merge | 225 | 225 | 63.9 | 5 | 45 | 3.52 |
+
+## Pre-proven burst (no merging)
+
+Run: 2026-07-13T20:43:04.358Z
+
+| experiment | config | ops requested | ops landed | wall (s) | blocks | max ops/block | ops/s (wall) | ops/s (chain) |
+|---|---|---:|---:|---:|---:|---:|---:|---:|
+| burst (pre-proven) | 90 txs submitted at once, no merge | 90 | 90 | 24.8 | 2 | 45 | 3.63 | 7.50 |
+| burst (pre-proven) | 225 txs submitted at once, no merge | 225 | 225 | 63.5 | 5 | 45 | 3.54 | 7.50 |
+
+## Sustained multi-block stream (round trip amortized)
+
+Run: 2026-07-13T20:45:57.508Z
+
+| experiment | config | ops requested | ops landed | wall (s) | blocks | max ops/block | ops/s (wall) | ops/s (chain) |
+|---|---|---:|---:|---:|---:|---:|---:|---:|
+| sustained (single) | 180 txs pipelined, 32 lanes, no merge | 180 | 180 | 109.7 | 16 | 30 | 1.64 | 1.76 |
+
+## Sustained multi-block stream (round trip amortized)
+
+Run: 2026-07-13T20:48:00.426Z
+
+| experiment | config | ops requested | ops landed | wall (s) | blocks | max ops/block | ops/s (wall) | ops/s (chain) |
+|---|---|---:|---:|---:|---:|---:|---:|---:|
+| sustained (single) | 1 txs pipelined, 1 lanes, no merge | 1 | 1 | 20.8 | 1 | 1 | 0.05 | 0.17 |
+
+## Sustained multi-block stream (round trip amortized)
+
+Run: 2026-07-13T20:50:08.838Z
+
+| experiment | config | ops requested | ops landed | wall (s) | blocks | max ops/block | ops/s (wall) | ops/s (chain) |
+|---|---|---:|---:|---:|---:|---:|---:|---:|
+| sustained (merged) | 1200 calls as merged ×150, continuous | 1200 | 1200 | 63.2 | 8 | 150 | 18.99 | 25.00 |

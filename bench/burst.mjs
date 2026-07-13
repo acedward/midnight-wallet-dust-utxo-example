@@ -6,7 +6,7 @@
  *
  *   node bench/burst.mjs [--api URL] [--node URL] [--sizes 20,30,40,60,100]
  */
-import { API, arg, canonicalRow, CANONICAL_HEADER, scanBlocks, sleep, waitForApiReady, writeResults } from './lib.mjs';
+import { API, arg, canonicalRow, CANONICAL_HEADER, chainSpanS, scanBlocks, sleep, waitForApiReady, writeResults } from './lib.mjs';
 
 const SIZES = arg('sizes', '20,30,40,60,100').split(',').map(Number);
 
@@ -34,6 +34,7 @@ const main = async () => {
       wallS: r.submitToFinalizedMs / 1000,
       blocks: blocks.length,
       maxOpsPerBlock: Math.max(0, ...blocks.map((b) => b.userTxs)),
+      chainS: chainSpanS(blocks),
     };
     console.log(canonicalRow(row));
     rows.push(row);
