@@ -117,6 +117,7 @@ interface Ready {
   readonly burst: (n: number) => Promise<object>;
   readonly mergeBurst: (total: number, groupSize: number) => Promise<object>;
   readonly mergeCallTest: (n: number) => Promise<object>;
+  readonly sustained: (mode: 'single' | 'merged', total: number, group: number, concurrency: number) => Promise<object>;
 }
 
 let ready: Ready | null = null;
@@ -623,6 +624,102 @@ const init = async (): Promise<void> => {
     };
   };
 
+  /** Build + prove ONE merged tx of `group` increment calls, balanced (books one dust coin). */
+  const prepareMergedCalls = async (group: number): Promise<{ identifiers: () => string[] }> => {
+    const ttl = new Date(Date.now() + 30 * 60 * 1000);
+    const usedSegments = new Set<number>();
+    const calls = await Promise.all(
+      Array.from({ length: group }, async () => {
+        const unproven = (await buildUnprovenIncrementTx(
+          providers,
+          state.contractAddress,
+        )) as ledger.UnprovenTransaction;
+        return randomizeSegment(unproven, usedSegments);
+      }),
+    );
+    const merged = calls.reduce((acc, tx) => acc.merge(tx));
+    const proven = await providers.proofProvider.proveTx(merged as never);
+    const recipe = await bench.wallet.balanceUnboundTransaction(
+      proven as never,
+      { shieldedSecretKeys: bench.shieldedSecretKeys, dustSecretKey: bench.dustSecretKey },
+      { ttl },
+    );
+    return bench.wallet.finalizeRecipe(recipe);
+  };
+
+  /** Submit without gating on the (hang-prone) ack; resolve when finalized on-chain. */
+  const submitAndWatch = async (tx: { identifiers: () => string[] }): Promise<void> => {
+    const ids = tx.identifiers();
+    void Promise.race([
+      bench.wallet.submitTransaction(tx as never),
+      new Promise((r) => setTimeout(r, 30_000)),
+    ]).catch(() => undefined);
+    await waitForFinalization(ids, ids[0] ?? '?');
+  };
+
+  /**
+   * Sustained multi-block throughput. A one-shot burst pays the full pipeline
+   * round trip (~4 blocks) for ~2 blocks of chain work; a CONTINUOUS stream
+   * amortizes that overhead — the clock runs first-submit → last-finalized
+   * across many consecutive blocks, converging on the chain-side rate.
+   *
+   * mode=single: `total` individual txs, pipelined with `concurrency` lanes.
+   * mode=merged: ceil(total/group) merged txs of `group` calls each; preparing
+   *   one (~2.5s) is faster than a block (6s), so the chain gets one
+   *   block-filling tx per block, back to back.
+   */
+  const sustained = async (mode: 'single' | 'merged', total: number, group: number, concurrency: number) => {
+    const before = await readCount(providers, state.contractAddress);
+    const h0 = await currentHeight();
+    const t0 = Date.now();
+    let firstSubmitAt = 0;
+    const markSubmit = () => {
+      if (firstSubmitAt === 0) firstSubmitAt = Date.now();
+    };
+
+    if (mode === 'merged') {
+      const rounds = Math.ceil(total / group);
+      // Prepare the next merged tx while previous ones confirm; cap in-flight
+      // watches loosely (each merged tx books just one dust coin).
+      const watches: Promise<void>[] = [];
+      for (let r = 0; r < rounds; r++) {
+        const tx = await prepareMergedCalls(Math.min(group, total - r * group));
+        markSubmit();
+        watches.push(submitAndWatch(tx));
+      }
+      await Promise.allSettled(watches);
+    } else {
+      let started = 0;
+      const lane = async (): Promise<void> => {
+        for (;;) {
+          if (started >= total) return;
+          started++;
+          const tx = await prepareSelfTx();
+          markSubmit();
+          await submitAndWatch(tx);
+        }
+      };
+      await Promise.allSettled(Array.from({ length: concurrency }, () => lane()));
+    }
+
+    const tEnd = Date.now();
+    const h1 = await currentHeight();
+    const after = await readCount(providers, state.contractAddress);
+    const opsLanded = after != null && before != null ? Number(after - before) : 0;
+    log(`sustained(${mode}): ${opsLanded}/${total} ops over blocks ${h0}..${h1}`);
+    return {
+      mode,
+      total,
+      group: mode === 'merged' ? group : 1,
+      concurrency: mode === 'single' ? concurrency : undefined,
+      opsLanded,
+      firstSubmitToLastFinalMs: tEnd - firstSubmitAt,
+      totalMs: tEnd - t0,
+      heightBefore: h0,
+      heightAfter: h1,
+    };
+  };
+
   ready = {
     state,
     providers,
@@ -635,6 +732,7 @@ const init = async (): Promise<void> => {
     burst,
     mergeBurst,
     mergeCallTest,
+    sustained,
   };
   log(`API ready on :${PORT} (tx concurrency=${TX_CONCURRENCY})`);
 };
@@ -712,6 +810,18 @@ const server = createServer((req: IncomingMessage, res: ServerResponse) => {
           result: (item as { result?: { status?: string } }).result?.status ?? null,
         })),
       });
+    }
+    if (req.method === 'POST' && url.pathname === '/sustained') {
+      if (!ready) return json(res, 503, { ok: false, error: 'not ready' });
+      const mode = url.searchParams.get('mode') ?? 'single';
+      if (mode !== 'single' && mode !== 'merged') return json(res, 400, { ok: false, error: 'mode: single|merged' });
+      const total = Number(url.searchParams.get('total') ?? (mode === 'merged' ? 1200 : 270));
+      const group = Number(url.searchParams.get('group') ?? 150);
+      const concurrency = Number(url.searchParams.get('concurrency') ?? 64);
+      if (![total, group, concurrency].every((v) => Number.isInteger(v) && v > 0) || total > 5000) {
+        return json(res, 400, { ok: false, error: 'invalid total/group/concurrency' });
+      }
+      return json(res, 200, await ready.sustained(mode, total, group, concurrency));
     }
     if (req.method === 'POST' && url.pathname === '/merge-call-test') {
       if (!ready) return json(res, 503, { ok: false, error: 'not ready' });

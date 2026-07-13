@@ -27,9 +27,18 @@ txs/block, 40 merged-×8 transfers/block) so the peak rows show clean per-block 
 | merged transfers | 80 transfers, no merge (baseline) | 80 | 80 | 37.7 | 4 | 23 | 2.12 |
 | merged transfers | 80 transfers, merged ×8 (2×40) | 80 | 80 | 21.7 | 2 | **40** | **3.69** |
 | merged contract calls | **150 calls in ONE tx** | 150 | 150 | 23.0 | 1 | **150** | **6.51** |
+| sustained (single) | 180 txs pipelined, 32 lanes | 180 | 180 | 108.4 | 11 | 30 | 1.66 |
+| sustained (merged) | **1200 calls, merged ×150 continuous** | 1200 | 1200 | 66.7 | 8 | **150** | **17.98** |
 
 (Chain-side the burst's `45+45` spans two 6s blocks — 7.5 tx/s of pure block capacity;
 the wall column additionally includes the wallet observing finalization via the indexer.)
+
+The sustained rows show round-trip amortization over many blocks: one-shot runs pay
+~2 blocks of fixed overhead (proving handoff + finalization observation) regardless of
+size. A CONTINUOUS merged stream kept **8 consecutive blocks completely full
+(150+150+150+150+150+150+150+150)** — 1200 ops in 48s of chain time = 25 ops/s
+chain-side, 17.98 ops/s measured wall. Sustained single-tx mode stays ~1.7 ops/s: the
+client's proving rate (not the chain) caps how fast unmerged blocks can be filled.
 
 Headline findings:
 

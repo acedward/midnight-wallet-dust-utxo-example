@@ -172,3 +172,20 @@ Run: 2026-07-13T19:46:17.416Z
 | experiment | config | ops requested | ops landed | wall (s) | blocks | max ops/block | ops/s |
 |---|---|---:|---:|---:|---:|---:|---:|
 | merged contract calls | 150 calls in ONE tx | 150 | 150 | 23.0 | 1 | 150 | 6.51 |
+
+## Sustained multi-block stream (round trip amortized)
+
+Run: 2026-07-13T20:02:45.739Z
+
+| experiment | config | ops requested | ops landed | wall (s) | blocks | max ops/block | ops/s |
+|---|---|---:|---:|---:|---:|---:|---:|
+| sustained (single) | 270 txs pipelined, 64 lanes, no merge | 270 | 184 | 652.4 | 13 | 45 | 0.28 |
+| sustained (merged) | 1200 calls as merged ×150, continuous | 1200 | 1200 | 66.7 | 8 | 150 | 17.98 |
+
+## Sustained multi-block stream (round trip amortized)
+
+Run: 2026-07-13T20:05:57.031Z
+
+| experiment | config | ops requested | ops landed | wall (s) | blocks | max ops/block | ops/s |
+|---|---|---:|---:|---:|---:|---:|---:|
+| sustained (single) | 180 txs pipelined, 32 lanes, no merge | 180 | 180 | 108.4 | 11 | 30 | 1.66 |
