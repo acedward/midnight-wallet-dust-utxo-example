@@ -1,9 +1,9 @@
 
-## Transaction.merge test (90 transfers per config)
+## Transaction.merge test (80 transfers per config)
 
-Run: 2026-07-13T18:39:40.192Z
+Run: 2026-07-13T18:45:28.725Z
 
 | group size | merged txs | finalized | transfers landed | balance+prove (s) | blocks | extrinsics/block | max transfers in one block |
 |---:|---:|---:|---:|---:|---:|---:|---:|
-| 5 | 18 | 18 | 90 | 2.4 | 3 | 7+7+4 | 35 |
-| 15 | 6 | 6 | 90 | 0.9 | 0 |  | 0 |
+| 8 | 10 | 10 | 80 | 1.5 | 2 | 5+5 | 40 |
+| 10 | 8 | 0 | 0 | 1.2 | 0 |  | 0 |

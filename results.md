@@ -63,3 +63,42 @@ into subsequent blocks in order.
 End-to-end implication: to saturate the node (7.5 tx/s) the client side must prove ~45
 txs per 6s — roughly 5-10× this machine's proving throughput — i.e. a fleet of proof
 servers. The chain itself was never the bottleneck until exactly 45/block.
+
+## Transaction.merge test (does merging improve throughput?)
+
+Contract calls cannot merge at all (ledger: at most ONE contract interaction per
+transaction). Fee-less transfers CAN — after rebuilding each at a random segment id
+(`Transaction.fromPartsRandomized`; wallet-built txs all sit at segment 1 and collide
+in `merge`). The benchmark wallet then balances each merged tx ONCE: one dust coin and
+one dust proof per GROUP instead of per transfer.
+
+| merge group | result | merged txs/block | transfers/block |
+|---:|---|---:|---:|
+| 1 (baseline) | ok | 23 | 23 |
+| 5 | ok | 7 | 35 |
+| **8** | **ok** | **5** | **40 (+74%)** |
+| 10 | ✗ node: `Malformed(FeeCalculation)` = `BlockLimitExceeded` | — | — |
+| 15 / 45 | ✗ same | — | — |
+| 90 | ✗ client: "exceeded block limit in transaction fee computation" | — | — |
+
+Findings:
+- **Yes, merging improves things**: +74% transfers per block (23 → 40) and an 8× cut in
+  the balancer's dust proofs (one per group), plus 8× fewer dust coins needed.
+- The merge width is capped ≈ 8-9 intents per tx: the ledger's fee/cost model is
+  **superlinear in intents** — a 5-transfer merge costs ≤1/7 block, a 15-transfer merge
+  exceeds an ENTIRE block's cost budget (`fees()` normalizes tx cost against
+  `params.limits.block_limits` and errors).
+- Raising the wallet's `additionalFeeOverhead` does not help — it is a hard cost-model
+  bound, not underpayment.
+- All blocks fill to `HitBlockWeightLimit` (node log) — every per-block cap measured in
+  this repo (45 counter calls, 23 plain transfers, 5 merged-8 txs) is the same weight
+  budget expressed in different transaction sizes.
+
+## Transaction.merge test (80 transfers per config)
+
+Run: 2026-07-13T18:45:28.725Z
+
+| group size | merged txs | finalized | transfers landed | balance+prove (s) | blocks | extrinsics/block | max transfers in one block |
+|---:|---:|---:|---:|---:|---:|---:|---:|
+| 8 | 10 | 10 | 80 | 1.5 | 2 | 5+5 | 40 |
+| 10 | 8 | 0 | 0 | 1.2 | 0 |  | 0 |
