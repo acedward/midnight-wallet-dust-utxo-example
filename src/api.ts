@@ -114,6 +114,7 @@ interface Ready {
   readonly sendSelf: (setPhase: SetPhase) => Promise<{ txHash: string }>;
   readonly sendExternal: (setPhase: SetPhase) => Promise<{ txHash: string }>;
   readonly burst: (n: number) => Promise<object>;
+  readonly mergeBurst: (total: number, groupSize: number) => Promise<object>;
 }
 
 let ready: Ready | null = null;
@@ -385,6 +386,99 @@ const init = async (): Promise<void> => {
     };
   };
 
+  /** Create + sign one fee-less transfer from the external wallet (unproven, unbalanced). */
+  const createFeelessTransfer = async () => {
+    const ttl = new Date(Date.now() + 30 * 60 * 1000);
+    const recipe = await external.wallet.transferTransaction(
+      [{ type: 'unshielded', outputs: [{ type: night, receiverAddress: sinkAddress, amount: externalTransferAmount }] }],
+      { shieldedSecretKeys: external.shieldedSecretKeys, dustSecretKey: external.dustSecretKey },
+      { ttl, payFees: false },
+    );
+    const signed = await external.wallet.signRecipe(recipe, (payload) => external.unshieldedKeystore.signData(payload));
+    if (signed.type !== 'UNPROVEN_TRANSACTION') throw new Error(`unexpected recipe type: ${signed.type}`);
+    return signed.transaction;
+  };
+
+  /**
+   * Merge burst: `total` fee-less transfers merged into groups of `groupSize`
+   * via `Transaction.merge`, each merged tx balanced ONCE by the benchmark
+   * wallet (one dust coin + one dust proof per GROUP, not per transfer), then
+   * all groups submitted simultaneously. Contract calls cannot be merged
+   * (ledger allows at most one contract interaction per tx) — transfers can.
+   */
+  const mergeBurst = async (total: number, groupSize: number) => {
+    const ttl = new Date(Date.now() + 30 * 60 * 1000);
+    const t0 = Date.now();
+    const transfers = await Promise.all(Array.from({ length: total }, () => createFeelessTransfer()));
+    const createMs = Date.now() - t0;
+
+    const t1 = Date.now();
+    const groups: (typeof transfers)[number][] = [];
+    for (let i = 0; i < transfers.length; i += groupSize) {
+      const group = transfers.slice(i, i + groupSize);
+      groups.push(group.reduce((acc, tx) => acc.merge(tx)));
+    }
+    const mergeMs = Date.now() - t1;
+    log(`mergeBurst(${total}/${groupSize}): merged into ${groups.length} txs in ${mergeMs}ms — balancing`);
+
+    const t2 = Date.now();
+    const finalized = await Promise.all(
+      groups.map(async (g) => {
+        const recipe = await bench.wallet.balanceUnprovenTransaction(
+          g,
+          { shieldedSecretKeys: bench.shieldedSecretKeys, dustSecretKey: bench.dustSecretKey },
+          { ttl },
+        );
+        return bench.wallet.finalizeRecipe(recipe);
+      }),
+    );
+    const balanceProveMs = Date.now() - t2;
+
+    const heightBeforeSubmit = await currentHeight();
+    const t3 = Date.now();
+    const submits = await Promise.allSettled(
+      finalized.map((tx) =>
+        Promise.race([
+          bench.wallet.submitTransaction(tx),
+          new Promise<never>((_r, rej) => setTimeout(() => rej(new Error('submit-ack-timeout')), 30_000)),
+        ]),
+      ),
+    );
+    const submitMs = Date.now() - t3;
+    const submitErrors = [
+      ...new Set(
+        submits
+          .filter((s) => s.status === 'rejected')
+          .map((s) => String((s as PromiseRejectedResult).reason?.message ?? (s as PromiseRejectedResult).reason)),
+      ),
+    ].slice(0, 3);
+
+    const t4 = Date.now();
+    const confirms = await Promise.allSettled(
+      finalized.map((tx) => waitForFinalization(tx.identifiers(), tx.identifiers()[0] ?? '?')),
+    );
+    const confirmMs = Date.now() - t4;
+    const finalizedCount = confirms.filter((c) => c.status === 'fulfilled').length;
+    const heightAfterConfirm = await currentHeight();
+    log(`mergeBurst(${total}/${groupSize}): ${finalizedCount}/${groups.length} merged txs finalized`);
+
+    return {
+      total,
+      groupSize,
+      mergedTxs: groups.length,
+      finalizedMergedTxs: finalizedCount,
+      transfersLanded: finalizedCount * groupSize,
+      createMs,
+      mergeMs,
+      balanceProveMs,
+      submitMs,
+      confirmMs,
+      heightBeforeSubmit,
+      heightAfterConfirm,
+      submitErrors,
+    };
+  };
+
   ready = {
     state,
     providers,
@@ -395,6 +489,7 @@ const init = async (): Promise<void> => {
     sendSelf,
     sendExternal,
     burst,
+    mergeBurst,
   };
   log(`API ready on :${PORT} (tx concurrency=${TX_CONCURRENCY})`);
 };
@@ -472,6 +567,16 @@ const server = createServer((req: IncomingMessage, res: ServerResponse) => {
           result: (item as { result?: { status?: string } }).result?.status ?? null,
         })),
       });
+    }
+    if (req.method === 'POST' && url.pathname === '/merge-burst') {
+      if (!ready) return json(res, 503, { ok: false, error: 'not ready' });
+      const total = Number(url.searchParams.get('total') ?? 90);
+      const group = Number(url.searchParams.get('group') ?? 1);
+      if (!Number.isInteger(total) || !Number.isInteger(group) || total < 1 || group < 1 || group > total) {
+        return json(res, 400, { ok: false, error: 'invalid total/group' });
+      }
+      const result = await ready.mergeBurst(total, group);
+      return json(res, 200, result);
     }
     if (req.method === 'POST' && url.pathname === '/burst') {
       if (!ready) return json(res, 503, { ok: false, error: 'not ready' });
