@@ -133,6 +133,7 @@ services:
       PORT: '3300'
       TX_CONCURRENCY: '${TX_CONCURRENCY:-8}'
       FEE_BLOCKS_MARGIN: '${FEE_BLOCKS_MARGIN:-5}'
+      FEE_OVERHEAD: '${FEE_OVERHEAD:-}'
     volumes:
       - shared:/shared
     depends_on:

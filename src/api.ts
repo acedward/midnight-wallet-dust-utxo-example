@@ -491,9 +491,34 @@ const init = async (): Promise<void> => {
         ),
       ].slice(0, 3);
 
+      // Only groups whose submission was ACCEPTED (ack or ack-timeout — the
+      // latter can still land) get a finalization wait; hard rejections are
+      // counted as failed and their booked inputs reverted immediately, so a
+      // failed config can't strand UTXOs for the next one.
+      const rejected = submits
+        .map((s, i) => ({ s, i }))
+        .filter(
+          ({ s }) =>
+            s.status === 'rejected' &&
+            !String((s as { s: PromiseRejectedResult }['s']).reason?.message ?? '').includes('submit-ack-timeout'),
+        )
+        .map(({ i }) => i);
+      if (rejected.length > 0) {
+        const rejectedTransfers = rejected.flatMap((i) => transfers.slice(i * groupSize, (i + 1) * groupSize));
+        await Promise.allSettled([
+          ...rejectedTransfers.map((tx) => external.wallet.revertTransaction(tx)),
+          ...rejected.map((i) => bench.wallet.revertTransaction(finalized[i] as never)),
+        ]);
+        log(`mergeBurst(${total}/${groupSize}): ${rejected.length} merged txs REJECTED at submission — inputs reverted`);
+      }
+      const rejectedSet = new Set(rejected);
       const t4 = Date.now();
       const confirms = await Promise.allSettled(
-        finalized.map((tx) => waitForFinalization(tx.identifiers(), tx.identifiers()[0] ?? '?')),
+        finalized.map((tx, i) =>
+          rejectedSet.has(i)
+            ? Promise.reject(new Error('rejected at submission'))
+            : waitForFinalization(tx.identifiers(), tx.identifiers()[0] ?? '?'),
+        ),
       );
       const confirmMs = Date.now() - t4;
       const finalizedCount = confirms.filter((c) => c.status === 'fulfilled').length;
