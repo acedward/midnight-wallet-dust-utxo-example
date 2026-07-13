@@ -40,3 +40,26 @@ TX_CONCURRENCY/dust coins in step.
 
 Dust after 370 txs: balance still growing (4.0e20) — at 6e12-NIGHT UTXOs the fee budget
 sustains this rate indefinitely; dust was not a limiter in this run.
+
+## Burst test (pre-proven txs submitted simultaneously)
+
+Run: 2026-07-13T18:26:54.150Z
+
+| burst size | prepared | finalized | submit→confirm (s) | blocks used | distribution | max in one block |
+|---:|---:|---:|---:|---:|---:|---:|
+| 20 | 20 | 20 | 0.0 | 1 | 20 | 20 |
+| 30 | 30 | 30 | 0.0 | 1 | 29 | 29 |
+| 40 | 40 | 40 | 0.0 | 1 | 40 | 40 |
+| 60 | 60 | 60 | 0.0 | 2 | 45+15 | 45 |
+| 100 | 100 | 100 | 2.8 | 3 | 45+45+10 | 45 |
+
+The 100-burst distribution — `45 + 45 + 10` in three consecutive blocks, nothing dropped
+(100/100 finalized) — pins the node's per-block packing cap at **45 of these txs per
+block** (block weight/size limit; all benchmark txs are identical counter-call + dust
+shape). At 6s blocks that is a **node-side ceiling of 7.5 tx/s** for this tx type. The
+mempool absorbed 100 pre-proven simultaneous submissions cleanly and spilled the excess
+into subsequent blocks in order.
+
+End-to-end implication: to saturate the node (7.5 tx/s) the client side must prove ~45
+txs per 6s — roughly 5-10× this machine's proving throughput — i.e. a fleet of proof
+servers. The chain itself was never the bottleneck until exactly 45/block.
